@@ -4,10 +4,20 @@
  */
 class BotManager {
     constructor() {
-        // Bot name pools for variety
-        this.namePrefixes = ['Player', 'Gamer', 'Pro', 'Master', 'Champ', 'Ace', 'Star', 'Elite'];
-        this.nameSuffixes = ['123', '456', '789', '007', '99', '88', '77', '66', '55', '44'];
-        this.indianNames = ['Ravi', 'Amit', 'Raj', 'Priya', 'Sneha', 'Karan', 'Anjali', 'Vikram', 'Neha', 'Rohit'];
+        // Indian name pool only
+        this.indianNames = [
+            'Aarav', 'Aditi', 'Amit', 'Ananya', 'Anjali', 'Arjun', 'Diya', 'Ishaan',
+            'Karan', 'Kavya', 'Meera', 'Neha', 'Nisha', 'Pranav', 'Priya', 'Rahul',
+            'Raj', 'Riya', 'Rohit', 'Saanvi', 'Sameer', 'Sanjay', 'Shreya', 'Sneha',
+            'Varun', 'Vikram'
+        ];
+
+        // Difficulty levels (0-1, where 1 is hardest)
+        this.difficultyLevels = {
+            easy: 0.3,      // Makes random moves 70% of time
+            medium: 0.6,    // Balanced strategy
+            hard: 0.95      // Smart strategy 95% of time
+        };
     }
 
     /**
@@ -18,24 +28,13 @@ class BotManager {
         let attempts = 0;
         
         do {
-            // Mix of patterns: "Player_123", "Ravi", "Gamer456"
-            const pattern = Math.random();
-            
-            if (pattern < 0.4) {
-                // Pattern: "Player_123"
-                const prefix = this.namePrefixes[Math.floor(Math.random() * this.namePrefixes.length)];
-                const suffix = this.nameSuffixes[Math.floor(Math.random() * this.nameSuffixes.length)];
-                name = `${prefix}_${suffix}`;
-            } else if (pattern < 0.7) {
-                // Pattern: "Ravi"
-                name = this.indianNames[Math.floor(Math.random() * this.indianNames.length)];
-            } else {
-                // Pattern: "Gamer456"
-                const prefix = this.namePrefixes[Math.floor(Math.random() * this.namePrefixes.length)];
-                const suffix = Math.floor(Math.random() * 1000);
-                name = `${prefix}${suffix}`;
+            const base = this.indianNames[Math.floor(Math.random() * this.indianNames.length)];
+            name = base;
+
+            if (existingNames.includes(name)) {
+                name = `${base}${Math.floor(Math.random() * 90) + 10}`;
             }
-            
+
             attempts++;
         } while (existingNames.includes(name) && attempts < 50);
         
@@ -43,12 +42,13 @@ class BotManager {
     }
 
     /**
-     * Create bot players
+     * Create bot players with difficulty level
      * @param {number} count - Number of bots to create
      * @param {Array} existingPlayers - Existing player names to avoid duplicates
+     * @param {string} difficulty - 'easy', 'medium', or 'hard'
      * @returns {Array} Array of bot player objects
      */
-    createBots(count, existingPlayers = []) {
+    createBots(count, existingPlayers = [], difficulty = 'medium') {
         const bots = [];
         const existingNames = existingPlayers.map(p => p.username || p.name);
         
@@ -60,12 +60,13 @@ class BotManager {
                 userId: `bot_${Date.now()}_${i}`, // Unique bot ID
                 username: botName,
                 isBot: true,
+                difficulty: difficulty || 'medium', // Store difficulty level
                 color: null, // Will be assigned by game logic
                 pawns: [
-                    { position: 0, isHome: false, isFinished: false },
-                    { position: 0, isHome: false, isFinished: false },
-                    { position: 0, isHome: false, isFinished: false },
-                    { position: 0, isHome: false, isFinished: false }
+                    { position: 0, isHome: true, isFinished: false },
+                    { position: 0, isHome: true, isFinished: false },
+                    { position: 0, isHome: true, isFinished: false },
+                    { position: 0, isHome: true, isFinished: false }
                 ],
                 points: 0,
                 isActive: true,
@@ -83,63 +84,80 @@ class BotManager {
      * @param {number} diceValue - Dice value rolled
      * @returns {number|null} Pawn index to move, or null if no valid move
      */
-    getBotMove(gameState, botPlayerIndex, diceValue) {
-        const bot = gameState.players[botPlayerIndex];
-        if (!bot || !bot.isBot) return null;
+        getBotMove(gameState, botPlayerIndex, diceValue) {
+            const bot = gameState.players[botPlayerIndex];
+            if (!bot || !bot.isBot) {
+                console.warn(`[BotManager] Bot not found or not a bot at index ${botPlayerIndex}`);
+                return null;
+            }
 
-        const gameLogic = require('./GameLogic');
-        const logic = new gameLogic();
-        
-        // Get valid moves
-        const validMoves = logic.getValidMoves(gameState, botPlayerIndex, diceValue);
-        
-        if (validMoves.length === 0) {
-            return null; // No valid moves
-        }
+            try {
+                const GameLogic = require('./GameLogic');
+                const logic = new GameLogic();
+            
+                // Get valid moves
+                const validMoves = logic.getValidMoves(gameState, botPlayerIndex, diceValue);
+            
+                if (validMoves.length === 0) {
+                    console.info(`[BotManager] No valid moves for bot ${bot.username} (ID: ${bot.userId})`);
+                    return null; // No valid moves
+                }
 
-        // Simple AI strategy:
-        // 1. Prefer moves that kill opponents
-        // 2. Prefer moves that get pawns out of home
-        // 3. Prefer moves that finish pawns
-        // 4. Otherwise, move first available pawn
+                // Get difficulty level (default to medium)
+                const difficulty = bot.difficulty || 'medium';
+                const difficultyScore = this.difficultyLevels[difficulty] || 0.6;
 
-        // Priority 1: Moves that kill opponents
-        const killMoves = validMoves.filter(m => m.willKill);
-        if (killMoves.length > 0) {
-            return killMoves[0].pawnIndex;
-        }
+                // Easy bots make random moves often
+                if (Math.random() > difficultyScore) {
+                    console.info(`[BotManager] Bot ${bot.username} (${difficulty}) making random move`);
+                    return validMoves[Math.floor(Math.random() * validMoves.length)].pawnIndex;
+                }
 
-        // Priority 2: Get pawn out of home (if dice is 6)
-        if (diceValue === 6) {
-            const homeMoves = validMoves.filter(m => {
-                const pawn = bot.pawns[m.pawnIndex];
-                return pawn.position === 0;
-            });
-            if (homeMoves.length > 0) {
-                return homeMoves[0].pawnIndex;
+                // Strategic moves based on difficulty
+                // Priority 1: Moves that kill opponents (all difficulties)
+                const killMoves = validMoves.filter(m => m.willKill);
+                if (killMoves.length > 0) {
+                    console.info(`[BotManager] Bot ${bot.username} (${difficulty}) choosing kill move`);
+                    return killMoves[0].pawnIndex;
+                }
+
+                // Priority 2: Get pawn out of home (all difficulties)
+                const homeMoves = validMoves.filter(m => {
+                    const pawn = bot.pawns[m.pawnIndex];
+                    return pawn.position === 0;
+                });
+                if (homeMoves.length > 0) {
+                    console.info(`[BotManager] Bot ${bot.username} (${difficulty}) choosing home move`);
+                    return homeMoves[0].pawnIndex;
+                }
+
+                // Priority 3: Moves that finish pawns (get to end) - Medium & Hard prefer this
+                if (difficulty !== 'easy') {
+                    const finishMoves = validMoves.filter(m => {
+                        const newPos = m.newPosition;
+                        return newPos >= 57; // Close to finish
+                    });
+                    if (finishMoves.length > 0) {
+                        finishMoves.sort((a, b) => b.newPosition - a.newPosition);
+                        console.info(`[BotManager] Bot ${bot.username} (${difficulty}) choosing finish move`);
+                        return finishMoves[0].pawnIndex;
+                    }
+                }
+
+                // Priority 4: Move pawn that's furthest along
+                validMoves.sort((a, b) => {
+                    const posA = bot.pawns[a.pawnIndex].position;
+                    const posB = bot.pawns[b.pawnIndex].position;
+                    return posB - posA;
+                });
+
+                console.info(`[BotManager] Bot ${bot.username} (${difficulty}) choosing standard move`);
+                return validMoves[0].pawnIndex;
+            } catch (error) {
+                console.error(`[BotManager] Error in getBotMove for bot ${bot?.username}:`, error);
+                return null;
             }
         }
-
-        // Priority 3: Moves that finish pawns (get to end)
-        const finishMoves = validMoves.filter(m => {
-            const newPos = m.newPosition;
-            return newPos >= 57; // Close to finish
-        });
-        if (finishMoves.length > 0) {
-            // Choose the one closest to finish
-            finishMoves.sort((a, b) => b.newPosition - a.newPosition);
-            return finishMoves[0].pawnIndex;
-        }
-
-        // Priority 4: Move pawn that's furthest along
-        validMoves.sort((a, b) => {
-            const posA = bot.pawns[a.pawnIndex].position;
-            const posB = bot.pawns[b.pawnIndex].position;
-            return posB - posA;
-        });
-
-        return validMoves[0].pawnIndex;
-    }
 
     /**
      * Check if a player is a bot

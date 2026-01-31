@@ -19,9 +19,10 @@ require 'includes/functions.php';
 
 // User details fetch
 $user_id = $_SESSION['user_id'];
-$stmt = $pdo->prepare("SELECT username, mobile FROM users WHERE id = ?");
+$stmt = $pdo->prepare("SELECT username, mobile, role FROM users WHERE id = ?");
 $stmt->execute([$user_id]);
 $user = $stmt->fetch();
+$is_admin = isset($user['role']) && $user['role'] === 'admin';
 
 // Wallet balance fetch (calculated from wallet_transactions)
 $balance = calculateUserBalance($user_id, $pdo);
@@ -40,14 +41,12 @@ $balance = calculateUserBalance($user_id, $pdo);
 </head>
 <body class="-z-20">
     <div class="container min-h-dvh relative overflow-hidden py-8 dark:text-white dark:bg-black">
-        <!-- Absolute Items -->
         <img src="assets/images/header-bg-1.png" alt="" class="absolute top-0 left-0 right-0 -mt-6" />
         <div class="absolute top-0 left-0 bg-p3 blur-[145px] h-[174px] w-[149px]"></div>
         <div class="absolute top-40 right-0 bg-[#0ABAC9] blur-[150px] h-[174px] w-[91px]"></div>
         <div class="absolute top-80 right-40 bg-p2 blur-[235px] h-[205px] w-[176px]"></div>
         <div class="absolute bottom-0 right-0 bg-p3 blur-[220px] h-[174px] w-[149px]"></div>
 
-        <!-- Page Title -->
         <div class="relative z-10 pb-20">
             <div class="flex justify-between items-center gap-4 px-6 relative z-20">
                 <div class="flex justify-start items-center gap-2">
@@ -63,7 +62,6 @@ $balance = calculateUserBalance($user_id, $pdo);
                 </div>
             </div>
 
-            <!-- Search Box -->
             <div class="flex justify-between items-center gap-3 pt-8 px-6 relative z-20">
                 <a href="upcoming-contest.php" class="flex justify-start items-center gap-3 bg-color24 border border-color24 p-4 rounded-full text-white w-full">
                     <i class="ph ph-magnifying-glass"></i>
@@ -72,18 +70,14 @@ $balance = calculateUserBalance($user_id, $pdo);
             </div>
 
             
-<!-- Banner Grid 3x2 -->
 <div class="banner-grid grid grid-cols-2 gap-1 mt-4 px-6" style="margin-top: 25px; gap: 5px;">
 
-    <!-- First banner - clickable game link -->
     <a href="upcoming-contest.php" class="banner-item relative block">
         <img src="assets/images/1.webp" alt="Banner 1" class="w-full h-full object-cover rounded-xl">
     </a>
 
-    <!-- Coming Soon banners -->
     <div class="banner-item relative rounded-xl overflow-hidden">
         <img src="assets/images/2.webp" alt="Banner 2" class="w-full h-full object-cover">
-        <!-- Highlighted text box -->
         <div class="absolute top-2 left-2 bg-p2 bg-opacity-90 px-3 py-1 rounded-md">
             <span class="text-white font-bold text-sm">Coming Soon</span>
         </div>
@@ -121,20 +115,21 @@ $balance = calculateUserBalance($user_id, $pdo);
 
 
 
-                      <!-- Upcoming Contest (Dynamic + Real Join on Home) -->
-            <div class="pt-12 pl-6">
+                      <div class="pt-12 pl-6">
                 <div class="flex justify-between items-center pr-6 mb-5">
                     <h3 class="text-xl font-semibold">Upcoming Contest</h3>
                     <a href="upcoming-contest.php" class="text-p1 font-semibold text-sm">See All</a>
                 </div>
 
                 <div class="pt-5" id="homeTablesContainer" style="margin-right: 8%;">
-                    <!-- Loading -->
                     <p class="text-center text-color5 py-8">Loading tables...</p>
                 </div>
             </div>
 
             <script>
+                window.isAdmin = <?= $is_admin ? 'true' : 'false' ?>;
+                const isAdmin = true;
+
                 async function loadHomeTables() {
                     try {
                         const res = await fetch('api/tables/list.php');
@@ -156,6 +151,13 @@ $balance = calculateUserBalance($user_id, $pdo);
                             const prize = table.prize_pool || table.entry_points * players;
                             const spotsLeft = table.spots_left || players;
                             const progressPercent = Math.round((players - spotsLeft) / players * 100);
+
+                            const spectatorButton = isAdmin ? `
+                                <button class="text-white text-xs bg-p1 py-1 px-3 rounded-full border border-p1 spectator-home-btn" data-id="${table.id}" title="Spectate">
+                                    <i class="ph ph-eye"></i>
+                                    <span class="ml-1">Spectate</span>
+                                </button>
+                            ` : '';
 
                             html += `
                             <div class="rounded-2xl overflow-hidden shadow2 border border-color21">
@@ -203,6 +205,7 @@ $balance = calculateUserBalance($user_id, $pdo);
                                             <button class="text-white text-xs bg-p2 py-1 px-4 rounded-full dark:bg-p1 join-home-btn" data-id="${table.id}">
                                                 Join Now
                                             </button>
+                                            ${spectatorButton}
                                             <div class="">
                                                 <p>Entry</p>
                                                 <p class="font-semibold">Rs. ${table.entry_points}</p>
@@ -250,6 +253,26 @@ $balance = calculateUserBalance($user_id, $pdo);
                             });
                         });
 
+                        if (isAdmin) {
+                            document.querySelectorAll('.spectator-home-btn').forEach(btn => {
+                                btn.addEventListener('click', async (e) => {
+                                    e.preventDefault();
+                                    const tableId = btn.getAttribute('data-id');
+                                    try {
+                                        const res = await fetch(`api/tables/get-active-virtual-table.php?table_id=${tableId}`);
+                                        const result = await res.json();
+                                        if (result.success && result.virtualTableId) {
+                                            window.location.href = `game.php?table_id=${tableId}&virtual_table_id=${result.virtualTableId}&spectator=1`;
+                                        } else {
+                                            alert('No active match found for this table.');
+                                        }
+                                    } catch (err) {
+                                        alert('Failed to open spectator view.');
+                                    }
+                                });
+                            });
+                        }
+
                     } catch (err) {
                         container.innerHTML = '<p class="text-center text-red-500 py-8">Error loading tables</p>';
                     }
@@ -258,7 +281,6 @@ $balance = calculateUserBalance($user_id, $pdo);
                 document.addEventListener('DOMContentLoaded', loadHomeTables);
             </script>
 
-    <!-- Bottom Tab -->
     <div class="fixed bottom-0 left-0 right-0 z-40">
         <div class="container bg-p2 px-6 py-3 rounded-t-2xl flex justify-around items-center dark:bg-p1">
             <a href="home.php" class="flex justify-center items-center text-center flex-col gap-1">
@@ -288,7 +310,6 @@ $balance = calculateUserBalance($user_id, $pdo);
         </div>
     </div>
 
-    <!-- Sidebar -->
     <div class="hidden sidebarModal inset-0 z-50">
         <div class="container bg-black bg-opacity-80 h-full overflow-y-auto">
             <div class="w-[330px] bg-slate-50 relative">
@@ -328,7 +349,7 @@ $balance = calculateUserBalance($user_id, $pdo);
                         </div>
                         <p class="text-p1 font-semibold text-sm">Rs. <?= number_format($balance) ?></p>
                     </a>
-                    <a href="settings.php" class="flex justify-between items-center py-3 px-4 border-b border-dashed border-color21 dark:bg-color1 dark:border-color24">
+                    <a href="settings.html" class="flex justify-between items-center py-3 px-4 border-b border-dashed border-color21 dark:bg-color1 dark:border-color24">
                         <div class="flex justify-start items-center gap-3">
                             <div class="flex justify-center items-center p-2 rounded-full border bg-color16 border-color14 text-lg !leading-none text-p2 dark:bg-bgColor14 dark:border-bgColor16 dark:text-p1">
                                 <i class="ph ph-gear-six"></i>
@@ -385,7 +406,6 @@ $balance = calculateUserBalance($user_id, $pdo);
         </div>
     </div>
 
-    <!-- Logout Modal -->
     <div class="hidden inset-0 withdrawModal z-50">
         <div class="bg-black opacity-40 absolute inset-0 container"></div>
         <div class="flex justify-end items-end flex-col h-full">
@@ -414,11 +434,62 @@ $balance = calculateUserBalance($user_id, $pdo);
         </div>
     </div>
 
-    <!-- Js Dependencies -->
     <script src="assets/js/plugins/plugins.js"></script>
     <script src="assets/js/plugins/plugin-custom.js"></script>
-    <script src="assets/js/plugins/circle-slider.js"></script>
     <script src="assets/js/main.js"></script>
     <script defer src="index.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const openBtn = document.querySelector('.sidebarModalOpenButton');
+    const sidebar = document.querySelector('.sidebarModal');
+    const closeBtn = document.querySelector('.sidebarModalCloseButton');
+    const overlay = sidebar ? sidebar.querySelector('.bg-black') : null;
+
+    // FORCE OPEN LOGIC
+    if (openBtn && sidebar) {
+        openBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            console.log("🍔 Menu Opening (Fixed)");
+
+            // Remove hidden class
+            sidebar.classList.remove('hidden');
+            
+            // Force Visibility CSS
+            sidebar.style.display = 'block';
+            sidebar.style.visibility = 'visible';
+            sidebar.style.position = 'fixed';
+            sidebar.style.zIndex = '9999';
+            sidebar.style.inset = '0';
+        });
+    }
+
+    // CLOSE LOGIC
+    const closeMenu = () => {
+        if(sidebar) {
+            sidebar.classList.add('hidden');
+            sidebar.style.display = 'none';
+        }
+    };
+
+    if (closeBtn) {
+        closeBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeMenu();
+        });
+    }
+
+    if (overlay) {
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                e.preventDefault();
+                e.stopPropagation();
+                closeMenu();
+            }
+        });
+    }
+});
+</script>
 </body>
 </html>

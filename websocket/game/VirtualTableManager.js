@@ -1,4 +1,4 @@
-const pool = require('../config/database');
+﻿const pool = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 const BotManager = require('./BotManager');
 
@@ -9,7 +9,7 @@ const BotManager = require('./BotManager');
 class VirtualTableManager {
     constructor() {
         this.botManager = new BotManager();
-        this.WAIT_TIME_SECONDS = 30;
+        this.WAIT_TIME_SECONDS = 60;
     }
 
     /**
@@ -34,7 +34,7 @@ class VirtualTableManager {
             );
 
             if (waitingVT.length > 0) {
-                console.log(`✅ Found user's existing WAITING virtual table: ${waitingVT[0].virtual_table_id}`);
+                console.log(`âœ… Found user's existing WAITING virtual table: ${waitingVT[0].virtual_table_id}`);
                 return waitingVT[0].virtual_table_id; // Reconnect to existing
             }
 
@@ -53,7 +53,7 @@ class VirtualTableManager {
             );
 
             if (runningVT.length > 0) {
-                console.log(`✅ Found user's existing RUNNING virtual table: ${runningVT[0].virtual_table_id}`);
+                console.log(`âœ… Found user's existing RUNNING virtual table: ${runningVT[0].virtual_table_id}`);
                 return runningVT[0].virtual_table_id; // Reconnect to existing game
             }
 
@@ -74,12 +74,12 @@ class VirtualTableManager {
             );
 
             if (availableVT.length > 0) {
-                console.log(`✅ Found available WAITING virtual table: ${availableVT[0].id}`);
+                console.log(`âœ… Found available WAITING virtual table: ${availableVT[0].id}`);
                 return availableVT[0].id; // Join existing virtual table
             }
 
             // PRIORITY 3: Create new virtual table
-            console.log(`🆕 Creating new virtual table for table ${tableId}`);
+            console.log(`ðŸ†• Creating new virtual table for table ${tableId}`);
             return await this.createVirtualTable(tableId);
 
         } catch (error) {
@@ -121,7 +121,7 @@ class VirtualTableManager {
                 [virtualTableId, tableId, waitEndTime]
             );
 
-            console.log(`✅ Created virtual table ${virtualTableId} for table ${tableId}`);
+            console.log(`âœ… Created virtual table ${virtualTableId} for table ${tableId}`);
             return virtualTableId;
 
         } catch (error) {
@@ -144,7 +144,7 @@ class VirtualTableManager {
 
             if (existing.length > 0) {
                 // Player already exists - RECONNECT
-                console.log(`🔄 Reconnecting ${isBot ? 'bot' : 'player'} ${username} to virtual table ${virtualTableId} at seat ${existing[0].seat_no}`);
+                console.log(`ðŸ”„ Reconnecting ${isBot ? 'bot' : 'player'} ${username} to virtual table ${virtualTableId} at seat ${existing[0].seat_no}`);
                 
                 // Update connection status and last action
                 await pool.execute(
@@ -173,12 +173,12 @@ class VirtualTableManager {
             // Add player
             await pool.execute(
                 `INSERT INTO virtual_table_players 
-                 (virtual_table_id, user_id, bot_id, is_bot, seat_no, is_connected, created_at) 
-                 VALUES (?, ?, ?, ?, ?, 1, NOW())`,
-                [virtualTableId, isBot ? null : userId, botId, isBot ? 1 : 0, seatNo]
+                 (virtual_table_id, user_id, bot_id, bot_name, is_bot, seat_no, is_connected, created_at) 
+                 VALUES (?, ?, ?, ?, ?, ?, 1, NOW())`,
+                [virtualTableId, isBot ? null : userId, botId, isBot ? username : null, isBot ? 1 : 0, seatNo]
             );
 
-            console.log(`✅ Added ${isBot ? 'bot' : 'player'} to virtual table ${virtualTableId} at seat ${seatNo}`);
+            console.log(`âœ… Added ${isBot ? 'bot' : 'player'} to virtual table ${virtualTableId} at seat ${seatNo}`);
             return seatNo;
 
         } catch (error) {
@@ -215,12 +215,51 @@ class VirtualTableManager {
                  ORDER BY vtp.seat_no ASC`,
                 [virtualTableId]
             );
+            const usedNames = new Set(
+                players
+                    .flatMap(p => [p.username, p.bot_name])
+                    .filter(Boolean)
+            );
+            for (const player of players) {
+                if (player.is_bot === 1 && !player.bot_name) {
+                    const generated = this.botManager.generateBotName(Array.from(usedNames));
+                    usedNames.add(generated);
+                    player.bot_name = generated;
+                    await pool.execute(
+                        'UPDATE virtual_table_players SET bot_name = ? WHERE id = ?',
+                        [generated, player.id]
+                    );
+                }
+            }
 
-            vt.players = players.map(p => ({
+            const maxPlayers = vt.type === '2-player' ? 2 : 4;
+            const realPlayers = players.filter(p => p.is_bot === 0);
+            const botPlayers = players.filter(p => p.is_bot === 1);
+            const allowedBots = Math.max(0, maxPlayers - realPlayers.length);
+            const extraBots = Math.max(0, botPlayers.length - allowedBots);
+
+            if (extraBots > 0) {
+                await pool.execute(
+                    `DELETE FROM virtual_table_players
+                     WHERE virtual_table_id = ? AND is_bot = 1
+                     ORDER BY id DESC
+                     LIMIT ${extraBots}`,
+                    [virtualTableId]
+                );
+            }
+
+            const trimmedBots = botPlayers
+                .sort((a, b) => a.seat_no - b.seat_no)
+                .slice(0, allowedBots);
+            const trimmedPlayers = [...realPlayers, ...trimmedBots]
+                .sort((a, b) => a.seat_no - b.seat_no)
+                .slice(0, maxPlayers);
+
+            vt.players = trimmedPlayers.map(p => ({
                 id: p.id,
                 userId: p.user_id,
                 botId: p.bot_id,
-                username: p.username || p.bot_id, // Use bot_id as username for bots
+                username: p.username || p.bot_name || p.bot_id,
                 isBot: p.is_bot === 1,
                 score: p.score,
                 seatNo: p.seat_no,
@@ -263,38 +302,75 @@ class VirtualTableManager {
                 []
             );
 
+            const startedVirtualTables = []; // Track which virtual tables were started
+
             for (const vt of waitingVTs) {
                 const realPlayers = parseInt(vt.real_player_count);
                 const maxPlayers = vt.type === '2-player' ? 2 : 4;
-                
-                // Always add exactly 1 bot (one slot always reserved for bot)
-                // 2-player: 1 real player + 1 bot
-                // 4-player: 3 real players + 1 bot
-                const botsNeeded = 1;
+                const minRealPlayers = 1;
 
-                if (realPlayers >= 1) {
-                    // Check if bot already exists
-                    const [existingBots] = await pool.execute(
-                        'SELECT COUNT(*) as bot_count FROM virtual_table_players WHERE virtual_table_id = ? AND is_bot = 1',
-                        [vt.id]
-                    );
-                    const botCount = existingBots[0]?.bot_count || 0;
-                    
-                    // Add bot if not already present
-                    if (botCount === 0) {
-                        await this.addBotsToVirtualTable(vt.id, botsNeeded);
+                console.log(`Checking virtual table ${vt.id}: ${realPlayers} real players, wait_end_time: ${vt.wait_end_time}`);
+
+                if (realPlayers >= minRealPlayers) {
+                    const botsNeeded = Math.max(0, maxPlayers - realPlayers);
+                    if (botsNeeded > 0) {
+                        // Check existing bots to avoid overfilling
+                        const [existingBots] = await pool.execute(
+                            'SELECT COUNT(*) as bot_count FROM virtual_table_players WHERE virtual_table_id = ? AND is_bot = 1',
+                            [vt.id]
+                        );
+                        const botCount = existingBots[0]?.bot_count || 0;
+                        const botsToAdd = Math.max(0, botsNeeded - botCount);
+
+                        if (botsToAdd > 0) {
+                            console.log(`Adding ${botsToAdd} bot(s) to virtual table ${vt.id}`);
+                            await this.addBotsToVirtualTable(vt.id, botsToAdd);
+                        }
                     }
 
-                    // Start the game
+                    // Start the game - This will update status from WAITING to RUNNING
+                    console.log(`Starting virtual table ${vt.id} (status will change: WAITING -> RUNNING)`);
                     await this.startVirtualTable(vt.id);
+                    startedVirtualTables.push(vt.id); // Track that this virtual table was started
                 } else {
-                    // Cancel and refund
-                    await this.cancelVirtualTable(vt.id);
+                    // Not enough real players to start
+                    console.log(`Virtual table ${vt.id} has insufficient real players, skipping start`);
                 }
             }
 
+            return startedVirtualTables; // Return list of virtual tables that were started
+
         } catch (error) {
             console.error('Error checking virtual tables:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Trim extra bots if total players exceed max seats
+     */
+    async trimBotsToMax(virtualTableId, maxPlayers) {
+        const [counts] = await pool.execute(
+            `SELECT 
+                SUM(is_bot = 0) as real_players,
+                SUM(is_bot = 1) as bot_count
+             FROM virtual_table_players
+             WHERE virtual_table_id = ?`,
+            [virtualTableId]
+        );
+        const realPlayers = parseInt(counts?.[0]?.real_players ?? 0);
+        const botCount = parseInt(counts?.[0]?.bot_count ?? 0);
+        const allowedBots = Math.max(0, maxPlayers - realPlayers);
+        const extraBots = Math.max(0, botCount - allowedBots);
+
+        if (extraBots > 0) {
+            await pool.execute(
+                `DELETE FROM virtual_table_players
+                 WHERE virtual_table_id = ? AND is_bot = 1
+                 ORDER BY id DESC
+                 LIMIT ${extraBots}`,
+                [virtualTableId]
+            );
         }
     }
 
@@ -305,7 +381,8 @@ class VirtualTableManager {
         try {
             // Get existing player names
             const [players] = await pool.execute(
-                `SELECT username FROM virtual_table_players vtp
+                `SELECT COALESCE(u.username, vtp.bot_name) AS username
+                 FROM virtual_table_players vtp
                  LEFT JOIN users u ON vtp.user_id = u.id
                  WHERE vtp.virtual_table_id = ?`,
                 [virtualTableId]
@@ -324,7 +401,7 @@ class VirtualTableManager {
                 );
             }
 
-            console.log(`🤖 Added ${count} bots to virtual table ${virtualTableId}`);
+            console.log(`ðŸ¤– Added ${count} bots to virtual table ${virtualTableId}`);
 
         } catch (error) {
             console.error('Error adding bots:', error);
@@ -342,39 +419,42 @@ class VirtualTableManager {
 
             // Check if already started
             if (vt.status === 'RUNNING') {
-                console.log(`⚠️ Virtual table ${virtualTableId} already running`);
+                console.log(`âš ï¸ Virtual table ${virtualTableId} already running`);
                 return;
             }
 
-            // Fetch time_limit directly from tables table
+            // Fetch time_limit from tables to compute duration
             const [tables] = await pool.execute(
-                'SELECT time_limit FROM tables WHERE id = ?',
-                [vt.table_id]
+                `SELECT t.time_limit
+                 FROM virtual_tables vt
+                 JOIN tables t ON vt.table_id = t.id
+                 WHERE vt.id = ?`,
+                [virtualTableId]
             );
 
             if (tables.length === 0) {
                 throw new Error('Table configuration not found');
             }
 
-            // Parse time_limit (e.g., "3-min", "5-min", "10-min") to seconds
-            // Extract integer and multiply by 60
-            const timeLimit = tables[0].time_limit;
-            const durationSeconds = this.parseTimeLimit(timeLimit);
-
-            const startTime = new Date();
-            const endTime = new Date(startTime);
-            endTime.setSeconds(endTime.getSeconds() + durationSeconds);
+            const durationSeconds = this.parseTimeLimit(tables[0].time_limit);
 
             // Set start_time, total_duration, and initialize current_duration to 0
+            // âš ï¸ STATUS UPDATE: WAITING â†’ RUNNING
+            console.log(`ðŸ”„ Updating virtual table ${virtualTableId} status: WAITING â†’ RUNNING`);
             await pool.execute(
                 `UPDATE virtual_tables 
-                 SET status = 'RUNNING', start_time = ?, end_time = ?, 
-                     total_duration = ?, current_duration = 0, current_turn_index = 0
+                 SET status = 'RUNNING',  
+                     start_time = NOW(),
+                     end_time = DATE_ADD(NOW(), INTERVAL ? SECOND),
+                     total_duration = ?,
+                     current_duration = 0,
+                     current_turn_index = 0
                  WHERE id = ?`,
-                [startTime, endTime, durationSeconds, virtualTableId]
+                [durationSeconds, durationSeconds, virtualTableId]
             );
 
-            console.log(`🎮 Started virtual table ${virtualTableId} (${durationSeconds}s duration from ${timeLimit}, ends at ${endTime.toISOString()})`);
+            console.log(`âœ… Virtual table ${virtualTableId} status updated to RUNNING`);
+            console.log(`ðŸŽ® Started virtual table ${virtualTableId} (${durationSeconds}s duration)`);
 
         } catch (error) {
             console.error('Error starting virtual table:', error);
@@ -409,7 +489,7 @@ class VirtualTableManager {
                 [virtualTableId]
             );
 
-            console.log(`❌ Cancelled virtual table ${virtualTableId}`);
+            console.log(`âŒ Cancelled virtual table ${virtualTableId}`);
 
         } catch (error) {
             console.error('Error cancelling virtual table:', error);
@@ -419,14 +499,20 @@ class VirtualTableManager {
 
     /**
      * Log dice roll
+     * @param {string} virtualTableId - Virtual table ID
+     * @param {number} virtualTablePlayerId - virtual_table_players.id (primary key)
+     * @param {number} diceValue - Dice value (1-6)
+     * @param {boolean} isForced - Whether dice was forced
+     * @param {number|null} adminId - Admin ID who forced the dice (if forced)
+     * @param {number} turnNo - Turn number
      */
-    async logDiceRoll(virtualTableId, playerId, botId, diceValue, isForced = false, adminId = null, turnNo) {
+    async logDiceRoll(virtualTableId, virtualTablePlayerId,botId, diceValue, isForced = false, adminId = null, turnNo) {
         try {
             await pool.execute(
                 `INSERT INTO virtual_table_dice_log 
                  (virtual_table_id, player_id, bot_id, dice_value, is_forced, forced_by_admin_id, turn_no, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, NOW())`,
-                [virtualTableId, playerId, botId, diceValue, isForced ? 1 : 0, adminId, turnNo]
+                [virtualTableId, virtualTablePlayerId, botId, diceValue, isForced ? 1 : 0, adminId, turnNo]
             );
         } catch (error) {
             console.error('Error logging dice roll:', error);
@@ -451,6 +537,7 @@ class VirtualTableManager {
     async updateCurrentDuration() {
         try {
             // Get all RUNNING virtual tables with start_time
+	    console.log('DEBUG POOL USER:',pool.pool ? pool.pool.config.connectionConfig.user : pool.config.connectionConfig.user);
             const [runningVTs] = await pool.execute(
                 `SELECT id, start_time, total_duration 
                  FROM virtual_tables 
@@ -522,4 +609,7 @@ class VirtualTableManager {
 }
 
 module.exports = VirtualTableManager;
+
+
+
 

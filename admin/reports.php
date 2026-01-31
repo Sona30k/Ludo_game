@@ -50,50 +50,171 @@ $total_prize = $pdo->query("SELECT COALESCE(SUM(t.entry_points * CASE WHEN t.typ
                            FROM games g JOIN tables t ON g.table_id = t.id WHERE g.status = 'completed'")->fetchColumn();
 ?>
 
-<div class="max-w-7xl mx-auto">
-    <h2 class="text-3xl font-bold mb-8">Reports & Analytics</h2>
+<style>
+    .report-page {
+        color: #e2e8f0;
+    }
+
+    .report-page .page-title {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 28px;
+    }
+
+    .report-page .page-subtitle {
+        color: rgba(226, 232, 240, 0.7);
+        font-size: 14px;
+    }
+
+    .report-page .stat-card {
+        border-radius: 24px;
+        padding: 26px 24px;
+        box-shadow: 0 18px 40px rgba(8, 12, 32, 0.35);
+        position: relative;
+        overflow: hidden;
+    }
+
+    .report-page .stat-card::after {
+        content: "";
+        position: absolute;
+        inset: auto -30% -40% auto;
+        width: 200px;
+        height: 200px;
+        background: radial-gradient(circle, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0) 70%);
+        opacity: 0.4;
+        pointer-events: none;
+    }
+
+    .report-page .stat-label {
+        font-size: 14px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+
+    .report-page .stat-value {
+        margin-top: 16px;
+        font-size: clamp(26px, 3vw, 38px);
+        font-weight: 800;
+        color: #fff;
+    }
+
+    .report-page .filter-card {
+        border-radius: 24px;
+        padding: 24px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: rgba(15, 23, 42, 0.55);
+        box-shadow: 0 18px 40px rgba(8, 12, 32, 0.3);
+    }
+
+    .report-page .filter-card input,
+    .report-page .filter-card select {
+        color: #0f172a;
+    }
+
+    .report-page .btn-primary {
+        background: linear-gradient(135deg, #3b82f6, #2563eb);
+        color: #fff;
+        border-radius: 14px;
+        font-weight: 700;
+        box-shadow: 0 12px 24px rgba(37, 99, 235, 0.35);
+    }
+
+    .report-page .btn-secondary {
+        background: rgba(148, 163, 184, 0.2);
+        color: #e2e8f0;
+        border-radius: 14px;
+        font-weight: 700;
+    }
+
+    .report-page .table-card {
+        border-radius: 26px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(15, 23, 42, 0.6);
+        box-shadow: 0 18px 40px rgba(8, 12, 32, 0.35);
+        overflow: hidden;
+    }
+
+    .report-page .table-title {
+        padding: 20px 24px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        font-size: 20px;
+        font-weight: 700;
+    }
+
+    .report-page table thead {
+        background: rgba(15, 23, 42, 0.7);
+    }
+
+    .report-page table th {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: rgba(226, 232, 240, 0.7);
+    }
+
+    .report-page .row-hover:hover {
+        background: rgba(148, 163, 184, 0.1);
+    }
+
+    .report-page .badge-credit {
+        background: rgba(34, 197, 94, 0.2);
+        color: #86efac;
+    }
+
+    .report-page .badge-debit {
+        background: rgba(239, 68, 68, 0.2);
+        color: #fca5a5;
+    }
+</style>
+
+<div class="max-w-7xl mx-auto report-page">
+    <div class="page-title">
+        <h2 class="text-3xl font-bold">Reports & Analytics</h2>
+        <p class="page-subtitle">Track wallet activity and summary performance at a glance.</p>
+    </div>
 
     <!-- Quick Stats -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 mb-12">
-        <div class="bg-gradient-to-br from-green-900/60 to-green-800/40 backdrop-blur-lg border border-green-500/30 rounded-3xl p-8 shadow-2xl">
-            <p class="text-green-300 text-lg font-medium">Total Credit</p>
-            <p class="text-6xl font-extrabold text-white mt-4">Rs. <?= number_format($total_credit) ?></p>
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
+        <div class="stat-card bg-gradient-to-br from-green-900/60 to-green-800/40 border border-green-500/30">
+            <p class="stat-label text-green-300">Total Credit</p>
+            <p class="stat-value">Rs. <?= number_format($total_credit) ?></p>
         </div>
-        <div class="bg-gradient-to-br from-red-900/60 to-red-800/40 backdrop-blur-lg border border-red-500/30 rounded-3xl p-8 shadow-2xl">
-            <p class="text-red-300 text-lg font-medium">Total Debit</p>
-            <p class="text-6xl font-extrabold text-white mt-4">Rs. <?= number_format($total_debit) ?></p>
+        <div class="stat-card bg-gradient-to-br from-red-900/60 to-red-800/40 border border-red-500/30">
+            <p class="stat-label text-red-300">Total Debit</p>
+            <p class="stat-value">Rs. <?= number_format($total_debit) ?></p>
         </div>
-        <div class="bg-gradient-to-br from-blue-900/60 to-blue-800/40 backdrop-blur-lg border border-blue-500/30 rounded-3xl p-8 shadow-2xl">
-            <p class="text-blue-300 text-lg font-medium">Completed Games</p>
-            <p class="text-6xl font-extrabold text-white mt-4"><?= $total_games ?></p>
+        <div class="stat-card bg-gradient-to-br from-blue-900/60 to-blue-800/40 border border-blue-500/30">
+            <p class="stat-label text-blue-300">Completed Games</p>
+            <p class="stat-value"><?= $total_games ?></p>
         </div>
-        <div class="bg-gradient-to-br from-purple-900/60 to-purple-800/40 backdrop-blur-lg border border-purple-500/30 rounded-3xl p-8 shadow-2xl">
-            <p class="text-purple-300 text-lg font-medium">Total Prize Pool</p>
-            <p class="text-6xl font-extrabold text-white mt-4">Rs. <?= number_format($total_prize) ?></p>
+        <div class="stat-card bg-gradient-to-br from-purple-900/60 to-purple-800/40 border border-purple-500/30">
+            <p class="stat-label text-purple-300">Total Prize Pool</p>
+            <p class="stat-value">Rs. <?= number_format($total_prize) ?></p>
         </div>
     </div>
 
     <!-- Filters -->
-    <div class="bg-white/10 backdrop-blur rounded-3xl p-8 mb-10 border border-white/20">
+    <div class="filter-card mb-10">
         <h3 class="text-2xl font-bold mb-6">Filter Transactions</h3>
-        <form method="GET" class="grid grid-cols-1 md:grid-cols-5 gap-6">
-            <input type="text" name="user" value="<?= htmlspecialchars($search_user) ?>" placeholder="Username or Mobile" 
-                   class="bg-white/10 border border-white/20 rounded-xl px-6 py-4 focus:outline-none focus:border-p2" />
-            <input type="date" name="from" value="<?= htmlspecialchars($date_from) ?>" 
-                   class="bg-white/10 border border-white/20 rounded-xl px-6 py-4 focus:outline-none focus:border-p2" />
-            <input type="date" name="to" value="<?= htmlspecialchars($date_to) ?>" 
-                   class="bg-white/10 border border-white/20 rounded-xl px-6 py-4 focus:outline-none focus:border-p2" />
-            <select name="type" class="bg-white/10 border border-white/20 rounded-xl px-6 py-4 focus:outline-none focus:border-p2">
+        <form method="GET" class="grid grid-cols-1 md:grid-cols-5 gap-4">
+            <input type="text" name="user" value="<?= htmlspecialchars($search_user) ?>" placeholder="Username or Mobile"
+                   class="bg-white/90 border border-white/20 rounded-xl px-5 py-3 focus:outline-none focus:border-blue-400" />
+            <input type="date" name="from" value="<?= htmlspecialchars($date_from) ?>"
+                   class="bg-white/90 border border-white/20 rounded-xl px-5 py-3 focus:outline-none focus:border-blue-400" />
+            <input type="date" name="to" value="<?= htmlspecialchars($date_to) ?>"
+                   class="bg-white/90 border border-white/20 rounded-xl px-5 py-3 focus:outline-none focus:border-blue-400" />
+            <select name="type" class="bg-white/90 border border-white/20 rounded-xl px-5 py-3 focus:outline-none focus:border-blue-400">
                 <option value="">All Types</option>
                 <option value="credit" <?= $type_filter === 'credit' ? 'selected' : '' ?>>Credit Only</option>
                 <option value="debit" <?= $type_filter === 'debit' ? 'selected' : '' ?>>Debit Only</option>
             </select>
-            <div class="flex gap-4">
-                <button type="submit" class="bg-p2 hover:bg-blue-600 px-8 py-4 rounded-xl font-bold flex-1">
+            <div class="flex gap-3">
+                <button type="submit" class="btn-primary px-6 py-3 flex-1">
                     Apply Filter
                 </button>
                 <?php if (!empty($_GET)): ?>
-                    <a href="reports.php" class="bg-gray-600 hover:bg-gray-700 px-8 py-4 rounded-xl font-bold flex-1 text-center">
+                    <a href="reports.php" class="btn-secondary px-6 py-3 flex-1 text-center">
                         Clear
                     </a>
                 <?php endif; ?>
@@ -102,8 +223,8 @@ $total_prize = $pdo->query("SELECT COALESCE(SUM(t.entry_points * CASE WHEN t.typ
     </div>
 
     <!-- Transactions Table -->
-    <div class="bg-white/10 backdrop-blur rounded-3xl border border-white/20 overflow-hidden shadow-2xl">
-        <h3 class="text-2xl font-bold p-8 border-b border-white/10">Wallet Transactions</h3>
+    <div class="table-card">
+        <h3 class="table-title">Wallet Transactions</h3>
         <div class="overflow-x-auto">
             <table class="w-full">
                 <thead class="bg-white/5">
@@ -120,14 +241,14 @@ $total_prize = $pdo->query("SELECT COALESCE(SUM(t.entry_points * CASE WHEN t.typ
                         <tr><td colspan="5" class="px-6 py-16 text-center text-gray-400 text-lg">No transactions found</td></tr>
                     <?php else: ?>
                         <?php foreach ($transactions as $t): ?>
-                            <tr class="border-t border-white/10 hover:bg-white/5 transition">
+                            <tr class="border-t border-white/10 transition row-hover">
                                 <td class="px-6 py-4"><?= date('d M Y, h:i A', strtotime($t['timestamp'])) ?></td>
                                 <td class="px-6 py-4">
                                     <p class="font-medium"><?= htmlspecialchars($t['username']) ?></p>
                                     <p class="text-sm opacity-70"><?= htmlspecialchars($t['mobile']) ?></p>
                                 </td>
                                 <td class="px-6 py-4">
-                                    <span class="px-4 py-2 rounded-full text-sm <?= $t['type'] === 'credit' ? 'bg-green-600/30 text-green-300' : 'bg-red-600/30 text-red-300' ?>">
+                                    <span class="px-4 py-2 rounded-full text-sm <?= $t['type'] === 'credit' ? 'badge-credit' : 'badge-debit' ?>">
                                         <?= ucfirst($t['type']) ?>
                                     </span>
                                 </td>

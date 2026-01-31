@@ -63,9 +63,17 @@ function calculateKillPenalty() {
  * @returns {boolean}
  */
 function isSafeSpot(position) {
-    // Safe spots in Ludo: 1, 9, 14, 22, 27, 35, 40, 48, 52
-    const safeSpots = [1, 9, 14, 22, 27, 35, 40, 48, 52];
+    // Safe spots in Ludo (star squares)
+    const safeSpots = [1, 9, 14, 22, 27, 35, 40, 48];
     return safeSpots.includes(position);
+}
+
+/**
+ * Star positions (jump squares)
+ * @returns {number[]}
+ */
+function getStarPositions() {
+    return [1, 9, 14, 22, 27, 35, 40, 48];
 }
 
 /**
@@ -100,6 +108,7 @@ module.exports = {
     calculateKillPoints,
     calculateKillPenalty,
     isSafeSpot,
+    getStarPositions,
     getPlayerColor,
     isValidDiceValue,
     getMaxPlayers

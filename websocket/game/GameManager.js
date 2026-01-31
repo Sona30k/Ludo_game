@@ -17,6 +17,11 @@ class GameManager {
         this.botManager = new BotManager();
         this.WAIT_TIME = 30; // 30 seconds wait time
         this.MIN_REAL_PLAYERS = 1; // Minimum real players required
+        this.io = null;
+    }
+
+    setIO(io) {
+        this.io = io;
     }
 
     /**
@@ -31,7 +36,9 @@ class GameManager {
      */
     async initializeGameFromVirtualTable(virtualTableId, virtualTable, players) {
         try {
+            console.log(`🎮 Initializing game state with ${players.length} players:`, players.map(p => ({ username: p.username, isBot: p.isBot, userId: p.userId })));
             const gameState = this.gameLogic.initializeGameState(players);
+            console.log(`✅ Game state initialized with ${gameState.players.length} players:`, gameState.players.map(p => ({ username: p.username, isBot: p.isBot, userId: p.userId })));
             
             // Add virtual table info
             gameState.virtualTableId = virtualTableId;
@@ -42,11 +49,21 @@ class GameManager {
             gameState.realPlayers = players.filter(p => !p.isBot).length;
             
             // Calculate remaining time based on current_duration (for resuming games)
-            if (virtualTable.status === 'RUNNING' && virtualTable.total_duration && virtualTable.current_duration !== null) {
-                // Game is running - calculate remaining time from current_duration
-                gameState.remainingTime = Math.max(0, virtualTable.total_duration - virtualTable.current_duration);
-                gameState.currentDuration = virtualTable.current_duration;
-                gameState.totalDuration = virtualTable.total_duration;
+            if (virtualTable.status === 'RUNNING') {
+                const totalDuration = virtualTable.total_duration || this.parseTimeLimit(virtualTable.time_limit);
+                let currentDuration = virtualTable.current_duration;
+                if (currentDuration === null && virtualTable.start_time && totalDuration) {
+                    const startedAtMs = new Date(virtualTable.start_time).getTime();
+                    if (!Number.isNaN(startedAtMs)) {
+                        currentDuration = Math.min(totalDuration, Math.floor((Date.now() - startedAtMs) / 1000));
+                    }
+                }
+                gameState.totalDuration = totalDuration || gameState.timeLimit;
+                gameState.currentDuration = Number.isFinite(currentDuration) ? currentDuration : 0;
+                gameState.remainingTime = Math.max(0, gameState.totalDuration - gameState.currentDuration);
+                if (virtualTable.start_time) {
+                    gameState.startedAt = new Date(virtualTable.start_time);
+                }
             } else {
                 // Game not started yet - use full time limit
                 gameState.remainingTime = gameState.timeLimit;
@@ -205,7 +222,7 @@ class GameManager {
             await this.fillBotsAndStart(tableId, io);
         } else {
             // Cancel and refund
-            await this.cancelGame(tableId, io);
+            //await this.cancelGame(tableId, io);
         }
     }
 
@@ -298,7 +315,7 @@ class GameManager {
     async startGame(tableId, io) {
         const gameState = this.activeGames.get(tableId);
         if (!gameState) {
-            throw new Error('Game not found');
+            throw new Error('Game not found1');
         }
 
         if (gameState.gameStatus !== 'waiting') {
@@ -309,7 +326,7 @@ class GameManager {
         gameState.startedAt = new Date();
 
         // Start game timer
-        this.startTimer(tableId);
+        this.startTimer(tableId, io);
 
         // Update database - NOW set table to ongoing (game is actually starting)
         await pool.execute(
@@ -337,7 +354,7 @@ class GameManager {
     /**
      * Start countdown timer for a game
      */
-    startTimer(tableId) {
+    startTimer(tableId, io) {
         const gameState = this.activeGames.get(tableId);
         if (!gameState) return;
 
@@ -350,11 +367,11 @@ class GameManager {
         const timer = setInterval(() => {
             if (gameState.remainingTime > 0) {
                 gameState.remainingTime--;
-            } else {
-                // Time's up - end game
-                this.endGameByTimer(tableId);
+            } else if (!gameState.finalMoves || !gameState.finalMoves.active) {
+                gameState.remainingTime = 0;
                 clearInterval(timer);
                 this.tableTimers.delete(tableId);
+                this.startFinalMoves(tableId, io);
             }
         }, 1000);
 
@@ -370,20 +387,164 @@ class GameManager {
 
         console.log(`⏰ Time's up for table ${tableId}`);
 
-        // Get ranking by points
         const ranking = this.gameLogic.getGameRanking(gameState);
-        
-        // End the game
         await this.endGame(tableId, ranking);
+    }
+
+    async startFinalMoves(tableId, io, virtualTableId = null) {
+        const gameState = this.activeGames.get(tableId);
+        if (!gameState || (gameState.finalMoves && gameState.finalMoves.active)) return;
+
+        const totalPlayers = gameState.players.length;
+        const queue = [];
+        for (let i = 0; i < totalPlayers; i++) {
+            queue.push((gameState.currentTurn + i) % totalPlayers);
+        }
+
+        gameState.gameStatus = 'final_moves';
+        gameState.finalMoves = {
+            active: true,
+            queue,
+            index: 0,
+            turnStartMs: null
+        };
+
+        const roomName = gameState.virtualTableId ? `virtual_table_${gameState.virtualTableId}` : `table_${tableId}`;
+        if (io) {
+            io.to(roomName).emit('final_moves_started', {
+                gameState,
+                virtualTableId: gameState.virtualTableId || virtualTableId
+            });
+        }
+
+        await this.beginFinalMoveTurn(tableId, io, virtualTableId);
+    }
+
+    async beginFinalMoveTurn(tableId, io, virtualTableId = null) {
+        const gameState = this.activeGames.get(tableId);
+        if (!gameState || !gameState.finalMoves?.active) return;
+
+        if (gameState.finalMoves.index >= gameState.finalMoves.queue.length) {
+            const ranking = this.gameLogic.getGameRanking(gameState);
+            await this.endGame(tableId, ranking);
+            return;
+        }
+
+        const playerIndex = gameState.finalMoves.queue[gameState.finalMoves.index];
+        gameState.currentTurn = playerIndex;
+        gameState.finalMoves.turnStartMs = Date.now();
+
+        const currentPlayer = gameState.players[playerIndex];
+        const rollResult = await this.rollDice(tableId, virtualTableId, currentPlayer.userId);
+        const validMoves = this.gameLogic.getValidMoves(gameState, playerIndex, rollResult.diceValue);
+        const diceEvents = Array.isArray(rollResult.events) ? [...rollResult.events] : [];
+        if (validMoves.length === 0) {
+            diceEvents.push({ type: 'NO_MOVES', points: 0 });
+        }
+
+        const roomName = gameState.virtualTableId ? `virtual_table_${gameState.virtualTableId}` : `table_${tableId}`;
+        if (io) {
+            io.to(roomName).emit('dice_rolled', {
+                playerId: currentPlayer.userId,
+                diceValue: rollResult.diceValue,
+                events: diceEvents,
+                gameState,
+                virtualTableId: gameState.virtualTableId || virtualTableId
+            });
+        }
+
+        if (validMoves.length === 0) {
+            gameState.diceValue = null;
+            await this.completeFinalMoveTurn(tableId, io, virtualTableId, currentPlayer.userId);
+            return;
+        }
+
+        if (this.botManager.isBot(currentPlayer.userId)) {
+            const pawnIndex = this.botManager.getBotMove(gameState, playerIndex, rollResult.diceValue);
+            if (pawnIndex === null || pawnIndex === undefined) {
+                await this.completeFinalMoveTurn(tableId, io, virtualTableId, currentPlayer.userId);
+                return;
+            }
+            const moveResult = await this.movePawn(tableId, currentPlayer.userId, pawnIndex);
+            const updatedState = this.getGameState(tableId);
+            if (io) {
+                io.to(roomName).emit('pawn_moved', {
+                    playerId: currentPlayer.userId,
+                    pawnIndex,
+                    moveResult,
+                    gameState: updatedState,
+                    virtualTableId: gameState.virtualTableId || virtualTableId
+                });
+            }
+            await this.completeFinalMoveTurn(tableId, io, virtualTableId, currentPlayer.userId);
+        }
+    }
+
+    async completeFinalMoveTurn(tableId, io, virtualTableId, userId) {
+        const gameState = this.activeGames.get(tableId);
+        if (!gameState || !gameState.finalMoves?.active) return;
+        const playerIndex = gameState.players.findIndex(p => p.userId == userId);
+        if (playerIndex !== -1 && gameState.finalMoves.turnStartMs) {
+            const player = gameState.players[playerIndex];
+        }
+        gameState.finalMoves.turnStartMs = null;
+        gameState.finalMoves.index += 1;
+
+        const roomName = gameState.virtualTableId ? `virtual_table_${gameState.virtualTableId}` : `table_${tableId}`;
+        if (io) {
+            io.to(roomName).emit('game_state', {
+                gameState,
+                virtualTableId: gameState.virtualTableId || virtualTableId
+            });
+        }
+
+        await this.beginFinalMoveTurn(tableId, io, virtualTableId);
+    }
+
+    /**
+     * Consume a dice override atomically so that only one roll can claim it.
+     */
+    async consumeDiceOverride(virtualTableId, tableId) {
+        const connection = await pool.getConnection();
+        try {
+            await connection.beginTransaction();
+            const [overrides] = await connection.execute(
+                `SELECT id, dice_value
+                 FROM dice_override
+                 WHERE virtual_table_id = ? AND table_id = ? AND used = 0
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                 FOR UPDATE`,
+                [virtualTableId, tableId]
+            );
+
+            if (overrides.length === 0) {
+                await connection.rollback();
+                return null;
+            }
+
+            const override = overrides[0];
+            await connection.execute(
+                'UPDATE dice_override SET used = 1 WHERE id = ?',
+                [override.id]
+            );
+            await connection.commit();
+            return override.dice_value;
+        } catch (error) {
+            await connection.rollback().catch(() => {});
+            throw error;
+        } finally {
+            connection.release();
+        }
     }
 
     /**
      * Roll dice for current player
      */
-    async rollDice(tableId, userId, overrideValue = null) {
+    async rollDice(tableId, virtualTableId, userId, overrideValue = null) {
         const gameState = this.activeGames.get(tableId);
         if (!gameState) {
-            throw new Error('Game not found');
+            throw new Error('Game not found2');
         }
 
         const currentPlayer = gameState.players[gameState.currentTurn];
@@ -393,35 +554,58 @@ class GameManager {
 
         // Check for admin dice override
         let diceValue = overrideValue;
+        let isForced = false;
+        const effectiveTableId = gameState.tableId || tableId;
         if (diceValue === null) {
-            // Check database for override
-            const [overrides] = await pool.execute(
-                'SELECT dice_value FROM dice_override WHERE table_id = ? AND used = 0 ORDER BY timestamp DESC LIMIT 1',
-                [tableId]
-            );
-
-            if (overrides.length > 0) {
-                diceValue = overrides[0].dice_value;
-                // Mark override as used
-                await pool.execute(
-                    'UPDATE dice_override SET used = 1 WHERE table_id = ? AND used = 0 ORDER BY timestamp DESC LIMIT 1',
-                    [tableId]
-                );
+            if (virtualTableId && effectiveTableId) {
+                console.log(`🔍 Checking dice_override for virtual_table_id: ${virtualTableId}, table_id: ${effectiveTableId}`);
+                try {
+                    const overrideValueFromDb = await this.consumeDiceOverride(virtualTableId, effectiveTableId);
+                    if (overrideValueFromDb !== null) {
+                        diceValue = overrideValueFromDb;
+                        isForced = true;
+                        console.log(`✅ Using dice_override value: ${diceValue} for virtual table ${virtualTableId}`);
+                    } else {
+                        diceValue = this.gameLogic.rollDice();
+                        console.log(`🎲 No dice_override found, using random dice: ${diceValue}`);
+                    }
+                } catch (error) {
+                    console.error('Error consuming dice override:', error);
+                    diceValue = this.gameLogic.rollDice();
+                    console.log(`🎲 Fallback random dice: ${diceValue}`);
+                }
             } else {
-                // Normal random dice
                 diceValue = this.gameLogic.rollDice();
+                console.log(`🎲 No virtual_table_id, using random dice: ${diceValue}`);
             }
+        } else {
+            isForced = true;
+            console.log(`🎯 Using provided override value: ${diceValue}`);
+        }
+
+        const events = [];
+        if (!gameState.turnFlags) {
+            gameState.turnFlags = {};
+        }
+        if (diceValue === 6) {
+            // In real Ludo, rolling a 6 gives you an extra turn (handled elsewhere)
+            gameState.turnFlags.noExtraTurn = false;
+        } else {
+            gameState.turnFlags.noExtraTurn = false;
         }
 
         gameState.diceValue = diceValue;
+        gameState.diceForced = isForced;
         gameState.lastAction = {
             type: 'dice_roll',
             playerId: userId,
             diceValue,
+            isForced,
             timestamp: new Date()
         };
 
-        return diceValue;
+        gameState.lastEvents = events;
+        return { diceValue, events, isForced };
     }
 
     /**
@@ -430,7 +614,7 @@ class GameManager {
     async movePawn(tableId, userId, pawnIndex) {
         const gameState = this.activeGames.get(tableId);
         if (!gameState) {
-            throw new Error('Game not found');
+            throw new Error('Game not found3');
         }
 
         const currentPlayer = gameState.players[gameState.currentTurn];
@@ -454,24 +638,20 @@ class GameManager {
             throw new Error('Invalid move');
         }
 
-        // Check if game is finished
-        const finishCheck = this.gameLogic.checkGameFinished(gameState);
-        if (finishCheck.finished) {
-            const ranking = this.gameLogic.getGameRanking(gameState);
-            await this.endGame(tableId, ranking);
-            return { ...moveResult, gameFinished: true, ranking };
-        }
-
-        // If dice is 6, player gets another turn
+        const hasCapture = moveResult.killedPawns && moveResult.killedPawns.length > 0;
+        const extraTurnAllowed = gameState.gameStatus !== 'final_moves' && !gameState.turnFlags?.noExtraTurn;
+        const extraTurn = extraTurnAllowed && (diceValue === 6 || hasCapture);
+        // If dice is 6 or capture, player gets another turn
         // Otherwise, move to next player
-        if (diceValue !== 6) {
+        if (!extraTurn && gameState.gameStatus !== 'final_moves') {
             this.gameLogic.nextTurn(gameState);
         }
 
         // Reset dice value
         gameState.diceValue = null;
+        gameState.turnFlags = { noExtraTurn: false };
 
-        return moveResult;
+        return { ...moveResult, extraTurn };
     }
 
     /**
@@ -493,21 +673,49 @@ class GameManager {
 
         // Update database
         const winner = ranking[0];
-        await pool.execute(
-            'UPDATE games SET status = ?, winner_id = ?, ended_at = NOW() WHERE id = ?',
-            ['completed', winner.userId, gameState.gameId]
-        );
+        
+        // Check if using virtual tables
+        if (gameState.virtualTableId) {
+            // Update virtual_tables table
+            // For bots, winner_id should be null (bots don't have user_id)
+            const winnerId = (winner && !this.botManager.isBot(winner.userId) && winner.userId) ? winner.userId : null;
+            
+            await pool.execute(
+                'UPDATE virtual_tables SET status = ?, winner_id = ?, end_time = NOW() WHERE id = ?',
+                ['ENDED', winnerId, gameState.virtualTableId]
+            );
+        } else {
+            // Legacy games table (if still using old system)
+            // Only update if gameId exists
+            if (gameState.gameId) {
+                const winnerId = (winner && winner.userId) ? winner.userId : null;
+                await pool.execute(
+                    'UPDATE games SET status = ?, winner_id = ?, end_time = NOW() WHERE id = ?',
+                    ['completed', winnerId, gameState.gameId]
+                );
+            }
+        }
 
-        await pool.execute(
-            'UPDATE tables SET status = ? WHERE id = ?',
-            ['completed', tableId]
-        );
+        // Don't update tables table status - keep it open for new games
+        // await pool.execute(
+        //     'UPDATE tables SET status = ? WHERE id = ?',
+        //     ['completed', tableId]
+        // );
 
         // Distribute prizes
         await this.distributePrizes(gameState, ranking);
 
-        console.log(`🏁 Game ended for table ${tableId}. Winner: ${winner.username}`);
+        console.log(`🏁 Game ended for table ${tableId}. Winner: ${winner?.username || 'Bot'}`);
         
+        if (this.io) {
+            const roomName = gameState.virtualTableId ? `virtual_table_${gameState.virtualTableId}` : `table_${tableId}`;
+            this.io.to(roomName).emit('game_finished', {
+                ranking,
+                gameState,
+                virtualTableId: gameState.virtualTableId || null
+            });
+        }
+
         // Keep game state for a while (for reconnection/review)
         setTimeout(() => {
             this.activeGames.delete(tableId);
@@ -523,46 +731,34 @@ class GameManager {
     async distributePrizes(gameState, ranking) {
         // Calculate prize pool based on REAL players only (not bots)
         const realPlayers = gameState.players.filter(p => !this.botManager.isBot(p.userId)).length;
-        const totalPrize = gameState.entryPoints * realPlayers;
-        
-        // Prize distribution: 1st gets 60%, 2nd gets 30%, 3rd gets 10% (if 4 players)
-        const prizeDistribution = {
-            2: [0.7, 0.3], // 2-player: 70% / 30%
-            4: [0.5, 0.3, 0.15, 0.05] // 4-player: 50% / 30% / 15% / 5%
-        };
+        const basePool = gameState.entryPoints * realPlayers;
+        const totalPrize = basePool + gameState.entryPoints; // Winner gets pool + own entry fee bonus
 
-        const distribution = prizeDistribution[gameState.players.length] || [1, 0, 0, 0];
-
-        for (let i = 0; i < ranking.length && i < distribution.length; i++) {
-            const player = ranking[i];
-            const prize = Math.floor(totalPrize * distribution[i]);
-
-            // Only distribute prizes to REAL players (not bots)
-            if (prize > 0 && !this.botManager.isBot(player.userId)) {
-                // Log credit transaction (balance is calculated from transactions, no wallet table update needed)
-                await pool.execute(
-                    'INSERT INTO wallet_transactions (user_id, amount, type, reason, table_id) VALUES (?, ?, ?, ?, ?)',
-                    [player.userId, prize, 'credit', `Won ${i + 1}st place in table #${gameState.tableId}`, gameState.tableId]
-                );
-            }
-            // Bots can win but don't receive payouts (winnings go to system)
+        const winner = ranking[0];
+        if (winner && !this.botManager.isBot(winner.userId)) {
+            await pool.execute(
+                'INSERT INTO wallet_transactions (user_id, amount, type, reason, table_id) VALUES (?, ?, ?, ?, ?)',
+                [winner.userId, totalPrize, 'credit', `Won table #${gameState.tableId} (100% prize + entry bonus)`, gameState.tableId]
+            );
         }
     }
 
     /**
      * Get game state
      */
-    getGameState(tableId) {
-        return this.activeGames.get(tableId);
+    getGameState(virtualTableId) {
+        console.log("getGameState", virtualTableId);
+        console.log("activeGames", this.activeGames);
+        return this.activeGames.get(virtualTableId);
     }
 
     /**
      * Add player to game
      */
-    addPlayerToGame(tableId, userId, username, socketId) {
-        const gameState = this.activeGames.get(tableId);
+    addPlayerToGame(virtualTableId, userId, username, socketId) {
+        const gameState = this.activeGames.get(virtualTableId);
         if (!gameState) {
-            throw new Error('Game not found');
+            throw new Error('Game not found: ' + virtualTableId);
         }
 
         // Check if player already in game (compare as numbers to avoid type mismatch)
@@ -587,10 +783,10 @@ class GameManager {
             isBot: false,
             color: this.gameLogic.getColorByIndex(playerIndex),
             pawns: [
-                { position: 0, isHome: false, isFinished: false },
-                { position: 0, isHome: false, isFinished: false },
-                { position: 0, isHome: false, isFinished: false },
-                { position: 0, isHome: false, isFinished: false }
+                { position: 0, isHome: true, isFinished: false },
+                { position: 0, isHome: true, isFinished: false },
+                { position: 0, isHome: true, isFinished: false },
+                { position: 0, isHome: true, isFinished: false }
             ],
             points: 0,
             isActive: true,
@@ -658,7 +854,7 @@ class GameManager {
                         // Cancel virtual table (this will refund players)
                         if (virtualTableManager) {
                             try {
-                                await virtualTableManager.cancelVirtualTable(virtualTableId);
+                                //await virtualTableManager.cancelVirtualTable(virtualTableId);
                             } catch (error) {
                                 console.error('Error cancelling virtual table:', error);
                             }
@@ -697,7 +893,7 @@ class GameManager {
     /**
      * Auto-play for inactive player
      */
-    async autoPlay(tableId) {
+    async autoPlay(tableId, virtualTableId) {
         const gameState = this.activeGames.get(tableId);
         if (!gameState) return;
 
@@ -706,7 +902,8 @@ class GameManager {
         // If player is inactive, auto-play
         if (!currentPlayer.isActive) {
             // Auto roll dice
-            const diceValue = await this.rollDice(tableId, currentPlayer.userId);
+            const rollResult = await this.rollDice(tableId, virtualTableId, currentPlayer.userId);
+            const diceValue = rollResult.diceValue;
             
             // Auto move first available pawn
             const validMoves = this.gameLogic.getValidMoves(
@@ -726,4 +923,3 @@ class GameManager {
 }
 
 module.exports = GameManager;
-

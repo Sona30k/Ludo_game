@@ -1,0 +1,546 @@
+const { 
+    calculateMovePoints, 
+    calculateKillPenalty,
+    isSafeSpot,
+    getStarPositions
+} = require('../utils/helpers');
+
+/**
+ * Game Logic Class
+ * Handles all game rules, pawn movements, and scoring
+ */
+class GameLogic {
+    constructor() {
+        this.mainTrackLength = 52;
+        this.homeStretchLength = 6;
+        this.maxPosition = this.mainTrackLength + this.homeStretchLength;
+        this.starPositions = getStarPositions();
+        this.comboWindowMs = 5000;
+    }
+
+    /**
+     * Initialize game state for a new game
+     */
+    initializeGameState(players) {
+        const gameState = {
+            players: players.map((player, index) => ({
+                userId: player.userId || player.id || player.botId, // Support userId, id, or botId
+                username: player.username,
+                isBot: player.isBot || false, // Preserve isBot flag from player object
+                color: player.color || this.getColorByIndex(index),
+                pawns: [
+                    { position: 0, isHome: true, isFinished: false },
+                    { position: 0, isHome: true, isFinished: false },
+                    { position: 0, isHome: true, isFinished: false },
+                    { position: 0, isHome: true, isFinished: false }
+                ],
+                points: player.points || 0, // Preserve existing points if any
+                captures: 0,
+                tokensHome: 0,
+                revengeTarget: null,
+                comboCount: 0,
+                comboBonusTotal: 0,
+                comboBest: 0,
+                lastScoreAt: null,
+                lastEventType: null,
+                consecutiveSix: 0,
+                speedBonusAwarded: false,
+                finalMoveMs: null,
+                isActive: true,
+                turnOrder: index
+            })),
+            currentTurn: 0, // Index of current player
+            diceValue: null,
+            lastEvents: [],
+            gameStatus: 'waiting', // waiting, playing, finished
+            startedAt: null,
+            lastAction: null
+        };
+
+        return gameState;
+    }
+
+    /**
+     * Get color by player index
+     */
+    getColorByIndex(index) {
+        const colors = ['red', 'blue', 'green', 'yellow'];
+        return colors[index] || 'red';
+    }
+
+    /**
+     * Roll dice (or use admin override)
+     */
+    rollDice(overrideValue = null) {
+        if (overrideValue !== null && overrideValue >= 1 && overrideValue <= 6) {
+            return overrideValue;
+        }
+        return Math.floor(Math.random() * 6) + 1;
+    }
+
+    /**
+     * Get valid moves for a player
+     */
+    getValidMoves(gameState, playerIndex, diceValue) {
+        const player = gameState.players[playerIndex];
+        const validMoves = [];
+
+        // Check each pawn
+        player.pawns.forEach((pawn, pawnIndex) => {
+            if (this.canMovePawn(gameState, playerIndex, pawnIndex, diceValue)) {
+                validMoves.push({
+                    pawnIndex,
+                    newPosition: this.calculateNewPosition(
+                        gameState, 
+                        playerIndex, 
+                        pawnIndex, 
+                        diceValue
+                    ),
+                    willKill: this.willKillOpponent(
+                        gameState, 
+                        playerIndex, 
+                        pawnIndex, 
+                        diceValue
+                    )
+                });
+            }
+        });
+
+        return validMoves;
+    }
+
+     /**
+     * Check if a pawn can be moved
+     */
+    canMovePawn(gameState, playerIndex, pawnIndex, diceValue) {
+        const player = gameState.players[playerIndex];
+        const pawn = player.pawns[pawnIndex];
+
+        // If pawn is finished, can't move
+        if (pawn.isFinished) {
+            return false;
+        }
+
+        // If pawn is at home, can only move on a 6
+        if (pawn.position === 0) {
+            return diceValue === 6;
+        }
+
+        return this.getMoveTarget(gameState, playerIndex, pawnIndex, diceValue).isValid;
+    }
+
+    /**
+     * Calculate new position after move
+     */
+    calculateNewPosition(gameState, playerIndex, pawnIndex, diceValue) {
+        const result = this.getMoveTarget(gameState, playerIndex, pawnIndex, diceValue);
+        return result.newPosition;
+    }
+
+    /**
+     * Check if move will kill an opponent pawn
+     */
+    willKillOpponent(gameState, playerIndex, pawnIndex, diceValue) {
+        const newPosition = this.calculateNewPosition(
+            gameState, 
+            playerIndex, 
+            pawnIndex, 
+            diceValue
+        );
+
+        if (isSafeSpot(newPosition)) {
+            return false;
+        }
+
+        return this.getOpponentPawnCountAt(gameState, playerIndex, newPosition) >= 1;
+    }
+
+    /**
+     * Move a pawn
+     */
+    movePawn(gameState, playerIndex, pawnIndex, diceValue) {
+        const player = gameState.players[playerIndex];
+        const pawn = player.pawns[pawnIndex];
+        const oldPosition = pawn.position;
+        const events = [];
+
+        const moveTarget = this.getMoveTarget(gameState, playerIndex, pawnIndex, diceValue);
+        if (!moveTarget.isValid) {
+            return { success: false };
+        }
+        const newPosition = moveTarget.newPosition;
+
+        // Update pawn position
+        pawn.position = newPosition;
+        pawn.isHome = newPosition === 0;
+
+        // Check if pawn finished
+        if (newPosition >= this.maxPosition) {
+            pawn.isFinished = true;
+        }
+
+        // Calculate points for movement
+        const blocksMoved = newPosition - oldPosition;
+        if (blocksMoved > 0) {
+            const movePoints = calculateMovePoints(blocksMoved);
+            player.points += movePoints;
+            events.push({ type: 'MOVE_SCORE', points: movePoints });
+        }
+
+        // Spawn bonus
+        if (oldPosition === 0 && newPosition === 1) {
+            player.points += 5;
+            events.push({ type: 'SPAWN_BONUS', points: 5 });
+        }
+
+        // Stars scoring (no jumps)
+        if (oldPosition < this.mainTrackLength) {
+            const maxPos = Math.min(newPosition, this.mainTrackLength);
+            const passedStars = this.starPositions.filter(pos => pos > oldPosition && pos < maxPos);
+            if (passedStars.length > 0) {
+                const passPoints = passedStars.length * 2;
+                player.points += passPoints;
+                events.push({ type: 'STAR_PASS', points: passPoints });
+            }
+            if (this.starPositions.includes(newPosition)) {
+                player.points += 5;
+                events.push({ type: 'STAR_LAND', points: 5 });
+            }
+        }
+
+        // Enter home stretch
+        if (oldPosition <= this.mainTrackLength && newPosition > this.mainTrackLength) {
+            player.points += 10;
+            events.push({ type: 'ENTER_HOME', points: 10 });
+        }
+
+        // Final home cell
+        if (newPosition === this.maxPosition) {
+            player.points += 50;
+            events.push({ type: 'FINAL_HOME', points: 50 });
+        }
+
+        // Check for kills (capture)
+        const killedPawns = this.checkAndKillOpponents(
+            gameState,
+            playerIndex,
+            newPosition
+        );
+
+        if (killedPawns.length > 0) {
+            player.captures += killedPawns.length;
+            if (killedPawns.length >= 2) {
+                player.points += 40;
+                events.push({ type: 'DOUBLE_CAPTURE', points: 40 });
+            } else {
+                player.points += 20;
+                events.push({ type: 'CAPTURE', points: 20 });
+            }
+
+            killedPawns.forEach(killed => {
+                const killedPlayer = gameState.players[killed.playerIndex];
+                killedPlayer.points = Math.max(0, killedPlayer.points - calculateKillPenalty());
+                killedPlayer.revengeTarget = playerIndex;
+            });
+
+            if (player.revengeTarget !== null) {
+                const revengeHit = killedPawns.some(killed => killed.playerIndex === player.revengeTarget);
+                if (revengeHit) {
+                    player.points += 25;
+                    events.push({ type: 'REVENGE', points: 25 });
+                    player.revengeTarget = null;
+                }
+            }
+        }
+
+        // Home bonuses (token finished)
+        if (newPosition === this.maxPosition && !pawn.wasCountedHome) {
+            pawn.wasCountedHome = true;
+            player.tokensHome += 1;
+            if (player.tokensHome === 1) {
+                player.points += 50;
+                events.push({ type: 'FIRST_HOME', points: 50 });
+            } else {
+                player.points += 40;
+                events.push({ type: 'TOKEN_HOME', points: 40 });
+            }
+            if (player.tokensHome === 4) {
+                player.points += 100;
+                events.push({ type: 'ALL_HOME', points: 100 });
+                if (gameState.remainingTime > 0 && !player.speedBonusAwarded) {
+                    player.points += 30;
+                    player.speedBonusAwarded = true;
+                    events.push({ type: 'SPEED_BONUS', points: 30 });
+                }
+            }
+        }
+
+        const eventType = this.getPrimaryEventType({
+            capture: killedPawns.length > 0,
+            star: this.starPositions.includes(newPosition),
+            home: newPosition >= this.maxPosition || (oldPosition <= this.mainTrackLength && newPosition > this.mainTrackLength)
+        });
+        const comboBonus = this.applyComboBonus(player, eventType);
+        if (comboBonus > 0) {
+            player.points += comboBonus;
+            events.push({ type: 'COMBO_BONUS', points: comboBonus });
+        }
+
+        return {
+            success: true,
+            oldPosition,
+            newPosition,
+            blocksMoved,
+            killedPawns,
+            pointsEarned: events.reduce((sum, evt) => sum + (evt.points || 0), 0),
+            events
+        };
+    }
+
+    /**
+     * Check and kill opponent pawns at a position
+     */
+    checkAndKillOpponents(gameState, playerIndex, position) {
+        // Can't kill on safe spots
+        if (isSafeSpot(position)) {
+            return [];
+        }
+
+        const killedPawns = [];
+
+        // Check all other players
+        for (let i = 0; i < gameState.players.length; i++) {
+            if (i === playerIndex) continue;
+
+            const opponent = gameState.players[i];
+            const opponentPositions = opponent.pawns.filter(p => p.position === position && p.position !== 0 && !p.isFinished);
+            if (opponentPositions.length >= 1) {
+                opponentPositions.forEach(pawn => {
+                    const pawnIndex = opponent.pawns.indexOf(pawn);
+                    pawn.position = 0;
+                    pawn.isHome = true;
+                    killedPawns.push({
+                        playerIndex: i,
+                        pawnIndex,
+                        userId: opponent.userId
+                    });
+                });
+            }
+        }
+
+        return killedPawns;
+    }
+
+    getMoveTarget(gameState, playerIndex, pawnIndex, diceValue) {
+        const player = gameState.players[playerIndex];
+        const pawn = player.pawns[pawnIndex];
+
+        if (pawn.isFinished) {
+            return { isValid: false, newPosition: pawn.position };
+        }
+
+        if (pawn.position === 0) {
+            if (diceValue !== 6) {
+                return { isValid: false, newPosition: pawn.position };
+            }
+            if (this.isBlockedDestination(gameState, playerIndex, 1)) {
+                return { isValid: false, newPosition: pawn.position };
+            }
+            return { isValid: true, newPosition: 1 };
+        }
+
+        const tentative = pawn.position + diceValue;
+        if (tentative > this.maxPosition) {
+            return { isValid: false, newPosition: pawn.position };
+        }
+
+        // Check blockades on the path in main track
+        if (pawn.position <= this.mainTrackLength) {
+            const pathEnd = Math.min(tentative, this.mainTrackLength);
+            if (this.hasBlockadeOnPath(gameState, pawn.position + 1, pathEnd, playerIndex)) {
+                return { isValid: false, newPosition: pawn.position };
+            }
+        }
+
+        let newPosition = tentative;
+
+        if (this.isBlockedDestination(gameState, playerIndex, newPosition)) {
+            return { isValid: false, newPosition: pawn.position };
+        }
+
+        return { isValid: true, newPosition };
+    }
+
+    hasBlockadeOnPath(gameState, start, end, playerIndex) {
+        if (start > end) return false;
+        for (let pos = start; pos <= end; pos++) {
+            const owner = this.getBlockadeOwner(gameState, pos);
+            if (owner !== null) {
+                if (pos === end) {
+                    if (owner === playerIndex) {
+                        continue;
+                    }
+                    if (!isSafeSpot(pos)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    getBlockadeOwner(gameState, position) {
+        if (position <= 0 || position > this.mainTrackLength) return null;
+        for (let i = 0; i < gameState.players.length; i++) {
+            const player = gameState.players[i];
+            const count = player.pawns.filter(p => p.position === position).length;
+            if (count >= 2) {
+                return i;
+            }
+        }
+        return null;
+    }
+
+    isBlockedDestination(gameState, playerIndex, position) {
+        if (position <= 0 || position > this.mainTrackLength) {
+            return false;
+        }
+        for (let i = 0; i < gameState.players.length; i++) {
+            const player = gameState.players[i];
+            const count = player.pawns.filter(p => p.position === position).length;
+            if (count >= 2 && i !== playerIndex) {
+                return isSafeSpot(position);
+            }
+        }
+        return false;
+    }
+
+    getOpponentPawnCountAt(gameState, playerIndex, position) {
+        let count = 0;
+        for (let i = 0; i < gameState.players.length; i++) {
+            if (i === playerIndex) continue;
+            const opponent = gameState.players[i];
+            count += opponent.pawns.filter(p => p.position === position && p.position !== 0 && !p.isFinished).length;
+        }
+        return count;
+    }
+
+    getPrimaryEventType(flags) {
+        if (flags.home) return 'home';
+        if (flags.capture) return 'capture';
+        if (flags.star) return 'safe';
+        return 'move';
+    }
+
+    applyComboBonus(player, currentType) {
+        const now = Date.now();
+        if (!player.lastScoreAt || (now - player.lastScoreAt) > this.comboWindowMs) {
+            player.comboCount = 1;
+        } else {
+            player.comboCount += 1;
+        }
+
+        let bonus = 0;
+        if (player.lastEventType) {
+            if (player.lastEventType === 'move' && currentType === 'capture') {
+                bonus += 10;
+            }
+            if (player.lastEventType === 'capture' && currentType === 'safe') {
+                bonus += 8;
+            }
+            if (player.lastEventType === 'capture' && currentType === 'home') {
+                bonus += 20;
+            }
+        }
+        if (player.comboCount >= 3) {
+            bonus += 30;
+        }
+
+        player.lastScoreAt = now;
+        player.lastEventType = currentType;
+        player.comboBonusTotal += bonus;
+        player.comboBest = Math.max(player.comboBest, bonus);
+        return bonus;
+    }
+
+    /**
+     * Check if game is finished
+     */
+    checkGameFinished(gameState) {
+        // Check if any player has all pawns finished
+        for (let i = 0; i < gameState.players.length; i++) {
+            const player = gameState.players[i];
+            const allFinished = player.pawns.every(pawn => pawn.isFinished);
+            
+            if (allFinished) {
+                return {
+                    finished: true,
+                    winnerIndex: i,
+                    winner: player
+                };
+            }
+        }
+
+        return { finished: false };
+    }
+
+    /**
+     * Get game ranking (by points, then by finished pawns)
+     */
+    getGameRanking(gameState) {
+        const ranking = gameState.players.map((player, index) => ({
+            userId: player.userId,
+            username: player.username,
+            points: player.points,
+            captures: player.captures || 0,
+            tokensHome: player.tokensHome || player.pawns.filter(p => p.isFinished).length,
+            finalMoveMs: player.finalMoveMs === null || player.finalMoveMs === undefined ? Number.MAX_SAFE_INTEGER : player.finalMoveMs,
+            comboBest: player.comboBest || 0,
+            index
+        }));
+
+        // Sort by: points, captures, tokens home, fastest final move, highest combo, seeded coin flip
+        ranking.sort((a, b) => {
+            if (b.points !== a.points) {
+                return b.points - a.points;
+            }
+            if (b.captures !== a.captures) {
+                return b.captures - a.captures;
+            }
+            if (b.tokensHome !== a.tokensHome) {
+                return b.tokensHome - a.tokensHome;
+            }
+            if (a.finalMoveMs !== b.finalMoveMs) {
+                return a.finalMoveMs - b.finalMoveMs;
+            }
+            if (b.comboBest !== a.comboBest) {
+                return b.comboBest - a.comboBest;
+            }
+            return this.getSeededTieValue(a.userId) - this.getSeededTieValue(b.userId);
+        });
+
+        return ranking;
+    }
+
+    getSeededTieValue(userId) {
+        const str = String(userId ?? '');
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = (hash * 31 + str.charCodeAt(i)) % 1000003;
+        }
+        return hash;
+    }
+
+    /**
+     * Move to next turn
+     */
+    nextTurn(gameState) {
+        gameState.currentTurn = (gameState.currentTurn + 1) % gameState.players.length;
+        gameState.diceValue = null;
+        return gameState.currentTurn;
+    }
+}
+
+module.exports = GameLogic;
+

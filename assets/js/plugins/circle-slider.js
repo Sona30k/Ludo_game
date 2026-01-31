@@ -110,13 +110,13 @@ function updatePaths(position) {
 }
 
 // Mouse event listeners
-circleSliders.addEventListener("mousedown", handleStart);
-circleSliders.addEventListener("mousemove", handleMove);
-circleSliders.addEventListener("mouseup", handleEnd);
-circleSliders.addEventListener("mouseleave", handleEnd);
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("mousedown", handleStart);
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("mousemove", handleMove);
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("mouseup", handleEnd);
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("mouseleave", handleEnd);
 
 // Touch event listeners
-circleSliders.addEventListener("touchstart", handleStart, { passive: false });
-circleSliders.addEventListener("touchmove", handleMove, { passive: false });
-circleSliders.addEventListener("touchend", handleEnd);
-circleSliders.addEventListener("touchcancel", handleEnd);
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("touchstart", handleStart, { passive: false });
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("touchmove", handleMove, { passive: false });
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("touchend", handleEnd);
+if (typeof slider !== 'undefined' && slider) circleSliders.addEventListener("touchcancel", handleEnd);

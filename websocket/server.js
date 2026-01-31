@@ -14,7 +14,58 @@ const virtualTableManager = new VirtualTableManager();
 // Start virtual table checker (runs every 2 seconds)
 setInterval(async () => {
     try {
-        await virtualTableManager.checkAndStartVirtualTables();
+        const startedVirtualTables = await virtualTableManager.checkAndStartVirtualTables();
+        
+        // For each virtual table that just started, update game state and trigger bot turns
+        if (startedVirtualTables && startedVirtualTables.length > 0) {
+            for (const virtualTableId of startedVirtualTables) {
+                // Get virtual table to get players
+                const virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+                if (!virtualTable) continue;
+                
+                // Get or initialize game state
+                let gameState = gameManager.getGameState(virtualTableId);
+                if (!gameState) {
+                    // Initialize game state from virtual table
+                    const players = virtualTable.players.map(p => ({
+                        userId: p.userId || p.botId,
+                        username: p.username,
+                        isBot: p.isBot || false,
+                        botId: p.botId || null,
+                        points: p.score || 0
+                    }));
+                    gameState = await gameManager.initializeGameFromVirtualTable(virtualTableId, virtualTable, players);
+                }
+                
+                // Update game status to 'running'
+                gameState.gameStatus = 'running';
+                gameState.startedAt = new Date();
+                
+                // Start timer
+                gameManager.startTimer(virtualTableId, io);
+                
+                // Emit game_started to all players in the room
+                const roomName = `virtual_table_${virtualTableId}`;
+                io.to(roomName).emit('game_started', {
+                    gameState,
+                    virtualTableId
+                });
+                
+                console.log(`🎮 Game started for virtual table ${virtualTableId}, emitting to room ${roomName}`);
+                
+                // If first player is a bot, trigger bot turn
+                if (gameState.players.length > 0 && gameState.currentTurn === 0) {
+                    const firstPlayer = gameState.players[0];
+                    if (gameManager.botManager.isBot(firstPlayer.userId)) {
+                        console.log(`🤖 First player is a bot (${firstPlayer.username}), triggering bot turn`);
+                        // Small delay to ensure clients receive game_started event first
+                        setTimeout(async () => {
+                            await handleBotTurn(virtualTableId, io, virtualTableId);
+                        }, 500);
+                    }
+                }
+            }
+        }
     } catch (error) {
         console.error('Virtual table checker error:', error);
     }
@@ -27,42 +78,77 @@ setInterval(async () => {
     } catch (error) {
         console.error('Duration updater error:', error);
     }
-}, 5000);
+}, 1000);
 
 /**
  * Handle bot turn (auto-play)
+ * Added recursion depth tracking to prevent infinite loops/freezes
  */
-async function handleBotTurn(gameId, io, virtualTableId = null) {
+async function handleBotTurn(gameId, io, virtualTableId = null, recursionDepth = 0) {
+    // ✅ CRITICAL: Prevent infinite recursion that freezes game
+    const MAX_BOT_TURNS = 20; // Max consecutive bot turns
+    if (recursionDepth > MAX_BOT_TURNS) {
+        console.warn(`⚠️ [GAME FREEZE PREVENTION] Max bot turn recursion (${MAX_BOT_TURNS}) reached! Stopping bot chain.`);
+        return;
+    }
+    
     const gameState = gameManager.getGameState(gameId);
-    if (!gameState || gameState.gameStatus !== 'playing') return;
-
-    const currentPlayer = gameState.players[gameState.currentTurn];
-    if (!currentPlayer || !gameManager.botManager.isBot(currentPlayer.userId)) {
-        return; // Not a bot's turn
+    if (!gameState) {
+        console.log(`⚠️ handleBotTurn: No game state found for ${gameId}`);
+        return;
+    }
+    
+    // Check if game is in a playable state (running or playing)
+    if (gameState.gameStatus !== 'playing' && gameState.gameStatus !== 'running') {
+        console.log(`⚠️ handleBotTurn: Game status is '${gameState.gameStatus}', not playable`);
+        return;
     }
 
-    // Wait a bit for visual effect (1-2 seconds)
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    const currentPlayer = gameState.players[gameState.currentTurn];
+    if (!currentPlayer) {
+        console.log(`⚠️ handleBotTurn: No current player at turn ${gameState.currentTurn}`);
+        return;
+    }
+    
+    if (!gameManager.botManager.isBot(currentPlayer.userId)) {
+        console.log(`ℹ️ handleBotTurn: Not a bot's turn (${currentPlayer.username})`);
+        return; // Not a bot's turn
+    }
+    
+    console.log(`🤖 Bot's turn [depth ${recursionDepth}]: ${currentPlayer.username} (${currentPlayer.userId}) at turn ${gameState.currentTurn}`);
+
+    // Wait a bit longer for visual effect so bots don't move instantly (about 2 seconds)
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     try {
-        // Bot rolls dice
-        const diceValue = await gameManager.rollDice(gameId, currentPlayer.userId);
+        // Bot rolls dice - rollDice will automatically check for dice_override first
+        // If virtualTableId is provided, it checks dice_override table
+        // If no override found, it uses random dice
+        console.log(`🤖 Bot ${currentPlayer.username} (${currentPlayer.userId}) rolling dice for virtual table ${virtualTableId || 'N/A'}`);
+        const rollResult = await gameManager.rollDice(gameId, virtualTableId || null, currentPlayer.userId);
+        const diceValue = rollResult.diceValue;
+        console.log(`🎲 Bot rolled: ${diceValue}${virtualTableId ? ' (checked dice_override first)' : ''}`);
         
         // Log dice roll if using virtual tables
         if (virtualTableId) {
             const virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
             if (virtualTable) {
-                const botPlayer = virtualTable.players.find(p => p.botId === currentPlayer.userId);
+                // Find bot player - botId in virtual table matches userId in gameState for bots
+                const botPlayer = virtualTable.players.find(p => p.botId === currentPlayer.userId || (p.isBot && p.userId === currentPlayer.userId));
                 if (botPlayer) {
+                    // For bots: virtualTablePlayerId is the virtual_table_players.id, botId is the bot's ID string
                     await virtualTableManager.logDiceRoll(
                         virtualTableId,
-                        null,
-                        botPlayer.botId,
+                        botPlayer.id, // virtual_table_players.id (player_id column)
+                        botPlayer.botId || currentPlayer.userId, // bot_id column
                         diceValue,
                         false,
                         null,
                         gameState.currentTurn || 0
                     );
+                    console.log(`📝 Logged bot dice roll: virtual_table_players.id=${botPlayer.id}, botId=${botPlayer.botId || currentPlayer.userId}`);
+                } else {
+                    console.warn(`⚠️ Bot player not found in virtual table for userId: ${currentPlayer.userId}`);
                 }
             }
         }
@@ -72,12 +158,14 @@ async function handleBotTurn(gameId, io, virtualTableId = null) {
         io.to(roomName).emit('dice_rolled', {
             playerId: currentPlayer.userId,
             diceValue,
+            isForced: rollResult.isForced,
+            events: rollResult.events,
             gameState: gameManager.getGameState(gameId),
             virtualTableId
         });
 
-        // Wait a bit more
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait again before moving pawn so total bot reaction feels like ~3–4 seconds
+        await new Promise(resolve => setTimeout(resolve, 2000));
 
         // Bot makes move
         const pawnIndex = gameManager.botManager.getBotMove(
@@ -107,16 +195,22 @@ async function handleBotTurn(gameId, io, virtualTableId = null) {
                     virtualTableId
                 });
             } else {
-                // Check if next player is also a bot (recursive)
-                await handleBotTurn(gameId, io, virtualTableId);
+                // Check if next player is also a bot (recursive) with depth tracking
+                await handleBotTurn(gameId, io, virtualTableId, recursionDepth + 1);
             }
         } else {
             // No valid moves, skip turn
             gameManager.gameLogic.nextTurn(gameState);
             gameState.diceValue = null;
             
-            // Check next player
-            await handleBotTurn(gameId, io, virtualTableId);
+            const roomName = virtualTableId ? `virtual_table_${virtualTableId}` : `table_${gameId}`;
+            io.to(roomName).emit('game_state', {
+                gameState,
+                virtualTableId
+            });
+            
+            // Check next player with depth tracking
+            await handleBotTurn(gameId, io, virtualTableId, recursionDepth + 1);
         }
     } catch (error) {
         console.error('Bot turn error:', error);
@@ -124,16 +218,32 @@ async function handleBotTurn(gameId, io, virtualTableId = null) {
 }
 
 // Create HTTP server
-const server = http.createServer();
+const serverStartTime = Date.now();
+const server = http.createServer((req, res) => {
+    if (req.method === 'GET' && (req.url === '/health' || req.url === '/healthz')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ok',
+            uptimeSeconds: Math.floor((Date.now() - serverStartTime) / 1000),
+            timestamp: new Date().toISOString()
+        }));
+        return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+});
 
 // Initialize Socket.IO with CORS
 const io = new Server(server, {
     cors: {
-        origin: process.env.CORS_ORIGIN || "http://localhost",
+        origin: process.env.CORS_ORIGIN || "http://localhost:8080",
         methods: ["GET", "POST"],
         credentials: true
     }
 });
+
+gameManager.setIO(io);
 
 // Middleware: Authenticate user
 io.use(async (socket, next) => {
@@ -176,33 +286,8 @@ io.on('connection', (socket) => {
      */
     socket.on('join_table', async (data) => {
         try {
-            const { tableId } = data;
-
-            // Verify user joined the table in database
-            const [userJoined] = await pool.execute(
-                `SELECT COUNT(*) as count FROM wallet_transactions 
-                 WHERE user_id = ? AND reason LIKE ? AND type = 'debit'`,
-                [socket.userId, `%table #${tableId}%`]
-            );
-
-            if (userJoined[0].count === 0) {
-                socket.emit('error', { message: 'You have not joined this table' });
-                return;
-            }
-
-            // Check table exists and is available
-            const [tables] = await pool.execute(
-                'SELECT id, type, time_limit, status FROM tables WHERE id = ? AND status = ?',
-                [tableId, 'open']
-            );
-
-            if (tables.length === 0) {
-                socket.emit('error', { message: 'Table not found or not available' });
-                return;
-            }
-
-            // Find or create virtual table (prioritizes user's existing active virtual table)
-            const virtualTableId = await virtualTableManager.findOrCreateVirtualTable(tableId, socket.userId);
+            const { tableId, virtualTableId, userId } = data;
+            console.log("join_table", data);
             
             // Add player to virtual table (or reconnect if already exists)
             const seatNo = await virtualTableManager.addPlayerToVirtualTable(
@@ -216,25 +301,71 @@ io.on('connection', (socket) => {
             console.log(`👤 Player ${socket.username} ${seatNo !== undefined ? 'reconnected to' : 'joined'} virtual table ${virtualTableId}`);
 
             // Get virtual table details
-            const virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+            let virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+            if (!virtualTable) {
+                throw new Error('Virtual table not found');
+            }
+
+            // Ensure bots are added to fill remaining seats
+            const maxPlayers = virtualTable.type === '2-player' ? 2 : 4;
+            await virtualTableManager.trimBotsToMax(virtualTableId, maxPlayers);
+            virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+
+            const realPlayers = virtualTable.players.filter(p => !p.isBot).length;
+            const botCount = virtualTable.players.filter(p => p.isBot).length;
+            const botsNeeded = Math.max(0, maxPlayers - realPlayers - botCount);
+
+            if (realPlayers >= 1 && botsNeeded > 0) {
+                await virtualTableManager.addBotsToVirtualTable(virtualTableId, botsNeeded);
+                virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+            }
             
-            // Get or create game state in memory
+            console.log(`🔍 Virtual table players from DB:`, virtualTable?.players?.map(p => ({
+                username: p.username,
+                userId: p.userId,
+                botId: p.botId,
+                isBot: p.isBot
+            })));
+            
+            // Always reinitialize from database to ensure we have all players (including bots)
+            // This ensures bots added after initial gameState creation are included
             let gameState = gameManager.getGameState(virtualTableId);
-            
+            console.log("gameState", gameState);
+            // Force reinitialize if player count doesn't match or gameState doesn't exist
             if (!gameState) {
+                console.log("gameState not found");
                 // Initialize game state from virtual table
-                const players = virtualTable.players.map(p => ({
-                    userId: p.userId || p.botId,
-                    username: p.username,
-                    isBot: p.isBot
-                }));
+                // Include ALL players (both real and bots)
+                const players = virtualTable.players.map(p => {
+                    const mapped = {
+                        userId: p.userId || p.botId, // For bots, userId will be botId
+                        username: p.username,
+                        isBot: p.isBot || false,
+                        botId: p.botId || null, // Preserve botId for reference
+                        points: p.score || 0 // Preserve score if any
+                    };
+                    console.log(`  → Mapping player:`, mapped);
+                    return mapped;
+                });
+
+                console.log(`📋 Mapped ${players.length} players for game initialization:`, players.map(p => ({ username: p.username, isBot: p.isBot, userId: p.userId, botId: p.botId })));
 
                 gameState = await gameManager.initializeGameFromVirtualTable(virtualTableId, virtualTable, players);
                 
                 // Start timer if game is already RUNNING (resuming)
                 if (virtualTable.status === 'RUNNING' && gameState.gameStatus === 'running') {
-                    gameManager.startTimer(virtualTableId);
+                    gameManager.startTimer(virtualTableId, io);
                 }
+            } else {
+                console.log(`✅ Using existing game state with ${gameState.players.length} players`);
+                // Still update gameState to ensure it has latest data
+                gameState = await gameManager.initializeGameFromVirtualTable(virtualTableId, virtualTable, virtualTable.players.map(p => ({
+                    userId: p.userId || p.botId,
+                    username: p.username,
+                    isBot: p.isBot || false,
+                    botId: p.botId || null,
+                    points: p.score || 0
+                })));
             }
 
             // Add player to game state (if not already added)
@@ -249,11 +380,15 @@ io.on('connection', (socket) => {
             socket.join(`virtual_table_${virtualTableId}`);
 
             // Send current game state
+            console.log(`📤 Sending game_state to client with ${gameState.players.length} players:`, 
+                gameState.players.map(p => ({ username: p.username, userId: p.userId, isBot: p.isBot })));
+            
             socket.emit('game_state', {
                 gameState,
                 virtualTableId,
                 yourPlayerIndex: gameState.players.findIndex(p => p.userId == socket.userId),
-                seatNo
+                seatNo,
+                virtualTableStatus: virtualTable.status // Include virtual table status
             });
 
             // Notify other players
@@ -264,7 +399,7 @@ io.on('connection', (socket) => {
                 virtualTableId
             });
 
-            // Emit wait countdown if waiting
+            // Emit wait countdown ONLY if waiting (not for RUNNING games)
             if (virtualTable.status === 'WAITING') {
                 const waitEndTime = new Date(virtualTable.wait_end_time);
                 const now = new Date();
@@ -275,10 +410,92 @@ io.on('connection', (socket) => {
                     total: 30,
                     virtualTableId
                 });
+            } else if (virtualTable.status === 'RUNNING') {
+                // If game is already running, emit game_started to hide waiting screen
+                socket.emit('game_started', {
+                    gameState,
+                    virtualTableId
+                });
             }
 
         } catch (error) {
             console.error('Join table error:', error);
+            socket.emit('error', { message: error.message });
+        }
+    });
+
+    /**
+     * Join as spectator (no player seat)
+     */
+    socket.on('join_spectator', async (data) => {
+        try {
+            const { virtualTableId } = data;
+            if (!virtualTableId) {
+                throw new Error('Missing virtualTableId');
+            }
+
+            let virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+            if (!virtualTable) {
+                throw new Error('Virtual table not found');
+            }
+
+            // Ensure bots are added to fill remaining seats (spectator view should match player view)
+            const maxPlayers = virtualTable.type === '2-player' ? 2 : 4;
+            await virtualTableManager.trimBotsToMax(virtualTableId, maxPlayers);
+            virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+
+            const realPlayers = virtualTable.players.filter(p => !p.isBot).length;
+            const botCount = virtualTable.players.filter(p => p.isBot).length;
+            const botsNeeded = Math.max(0, maxPlayers - realPlayers - botCount);
+
+            if (realPlayers >= 1 && botsNeeded > 0) {
+                await virtualTableManager.addBotsToVirtualTable(virtualTableId, botsNeeded);
+                virtualTable = await virtualTableManager.getVirtualTable(virtualTableId);
+            }
+
+            let gameState = gameManager.getGameState(virtualTableId);
+            if (!gameState) {
+                const players = virtualTable.players.map(p => ({
+                    userId: p.userId || p.botId,
+                    username: p.username,
+                    isBot: p.isBot || false,
+                    botId: p.botId || null,
+                    points: p.score || 0
+                }));
+                gameState = await gameManager.initializeGameFromVirtualTable(virtualTableId, virtualTable, players);
+
+                if (virtualTable.status === 'RUNNING' && gameState.gameStatus === 'running') {
+                    gameManager.startTimer(virtualTableId, io);
+                }
+            } else {
+                gameState = await gameManager.initializeGameFromVirtualTable(virtualTableId, virtualTable, virtualTable.players.map(p => ({
+                    userId: p.userId || p.botId,
+                    username: p.username,
+                    isBot: p.isBot || false,
+                    botId: p.botId || null,
+                    points: p.score || 0
+                })));
+            }
+
+            socket.join(`virtual_table_${virtualTableId}`);
+
+            socket.emit('game_state', {
+                gameState,
+                virtualTableId,
+                yourPlayerIndex: -1,
+                seatNo: null,
+                virtualTableStatus: virtualTable.status,
+                spectator: true
+            });
+
+            if (virtualTable.status === 'RUNNING') {
+                socket.emit('game_started', {
+                    gameState,
+                    virtualTableId
+                });
+            }
+        } catch (error) {
+            console.error('Join spectator error:', error);
             socket.emit('error', { message: error.message });
         }
     });
@@ -291,8 +508,23 @@ io.on('connection', (socket) => {
             const { virtualTableId, tableId } = data;
             const gameId = virtualTableId || tableId; // Support both
             
-            const diceValue = await gameManager.rollDice(gameId, socket.userId);
             const gameState = gameManager.getGameState(gameId);
+            if (gameState && gameState.gameStatus === 'final_moves') {
+                return;
+            }
+
+            const rollResult = await gameManager.rollDice(gameId, virtualTableId || null, socket.userId);
+            const diceValue = rollResult.diceValue;
+            const currentState = gameManager.getGameState(gameId);
+
+            // Check for valid moves, if none, change turn
+            const validMoves = gameManager.gameLogic.getValidMoves(currentState, currentState.currentTurn, diceValue);
+            const diceEvents = Array.isArray(rollResult.events) ? [...rollResult.events] : [];
+            if (validMoves.length === 0) {
+                diceEvents.push({ type: 'NO_MOVES', points: 0 });
+                gameManager.gameLogic.nextTurn(currentState);
+                currentState.diceValue = null; // Reset dice for next player
+            }
             
             // Get virtual table info for dice logging
             if (virtualTableId) {
@@ -300,15 +532,15 @@ io.on('connection', (socket) => {
                 if (virtualTable) {
                     // Find player in virtual table
                     const player = virtualTable.players.find(p => p.userId == socket.userId);
-                    if (player) {
+                    if (player && player.id) {
                         await virtualTableManager.logDiceRoll(
                             virtualTableId,
-                            player.userId,
-                            null,
+                            player.userId, // virtual_table_players.id
+                            null,//botId
                             diceValue,
                             false,
                             null,
-                            gameState.currentTurn || 0
+                            currentState.currentTurn || 0
                         );
                     }
                 }
@@ -319,7 +551,9 @@ io.on('connection', (socket) => {
             io.to(roomName).emit('dice_rolled', {
                 playerId: socket.userId,
                 diceValue,
-                gameState,
+                isForced: rollResult.isForced,
+                events: diceEvents,
+                gameState: currentState,
                 virtualTableId
             });
 
@@ -342,6 +576,14 @@ io.on('connection', (socket) => {
             
             const moveResult = await gameManager.movePawn(gameId, socket.userId, pawnIndex);
             const gameState = gameManager.getGameState(gameId);
+            
+            console.log(`✅ Move result:`, {
+                pawnIndex,
+                oldPosition: moveResult.oldPosition,
+                newPosition: moveResult.newPosition,
+                blocksMoved: moveResult.blocksMoved,
+                success: moveResult.success
+            });
 
             // Log move to virtual table if using virtual tables
             if (virtualTableId) {
@@ -378,17 +620,13 @@ io.on('connection', (socket) => {
                 virtualTableId
             });
 
-            // If game finished
-            if (moveResult.gameFinished) {
-                io.to(roomName).emit('game_finished', {
-                    ranking: moveResult.ranking,
-                    gameState,
-                    virtualTableId
-                });
-            } else {
-                // Check if next player is a bot
-                await handleBotTurn(gameId, io, virtualTableId);
+            if (gameState.gameStatus === 'final_moves') {
+                await gameManager.completeFinalMoveTurn(gameId, io, virtualTableId, socket.userId);
+                return;
             }
+
+            // Check if next player is a bot
+            await handleBotTurn(gameId, io, virtualTableId);
 
         } catch (error) {
             console.error('Move pawn error:', error);
@@ -438,11 +676,13 @@ io.on('connection', (socket) => {
      */
     socket.on('get_game_state', (data) => {
         try {
-            const { tableId } = data;
-            const gameState = gameManager.getGameState(tableId);
-
+        const { tableId, virtualTableId } = data;
+        console.log("get_game_state", data);
+        const gameId = virtualTableId || tableId;
+        const gameState = gameManager.getGameState(gameId);
+            console.log("gameState", gameState);
             if (!gameState) {
-                socket.emit('error', { message: 'Game not found' });
+                socket.emit('error', { message: 'Game not found5' });
                 return;
             }
 

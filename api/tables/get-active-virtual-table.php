@@ -14,24 +14,46 @@ if ($table_id <= 0) {
     jsonResponse(['error' => 'Invalid table'], 400);
 }
 
-// Find active virtual table for this user and table
-// Priority: Check user's existing virtual table first
-$stmt = $pdo->prepare("
-    SELECT vt.id as virtual_table_id, vt.status, vt.end_time, vt.wait_end_time
-    FROM virtual_tables vt
-    JOIN virtual_table_players vtp ON vt.id = vtp.virtual_table_id
-    WHERE vtp.user_id = ? 
-      AND vt.table_id = ?
-      AND vt.status IN ('WAITING', 'RUNNING')
-      AND (
-        (vt.status = 'WAITING' AND vt.wait_end_time > NOW()) OR
-        (vt.status = 'RUNNING' AND (vt.end_time IS NULL OR vt.end_time > NOW()))
-      )
-    ORDER BY vt.created_at DESC
-    LIMIT 1
-");
-$stmt->execute([$user_id, $table_id]);
-$virtualTable = $stmt->fetch();
+$stmt = $pdo->prepare("SELECT role FROM users WHERE id = ?");
+$stmt->execute([$user_id]);
+$role = $stmt->fetchColumn();
+$is_admin = $role === 'admin';
+
+if ($is_admin) {
+    // Admin can spectate any active virtual table for this table
+    $stmt = $pdo->prepare("
+        SELECT vt.id as virtual_table_id, vt.status, vt.end_time, vt.wait_end_time
+        FROM virtual_tables vt
+        WHERE vt.table_id = ?
+          AND vt.status IN ('WAITING', 'RUNNING')
+          AND (
+            (vt.status = 'WAITING' AND vt.wait_end_time > NOW()) OR
+            (vt.status = 'RUNNING' AND (vt.end_time IS NULL OR vt.end_time > NOW()))
+          )
+        ORDER BY vt.created_at DESC
+        LIMIT 1
+    ");
+    $stmt->execute([$table_id]);
+    $virtualTable = $stmt->fetch();
+} else {
+    // Find active virtual table for this user and table
+    $stmt = $pdo->prepare("
+        SELECT vt.id as virtual_table_id, vt.status, vt.end_time, vt.wait_end_time
+        FROM virtual_tables vt
+        JOIN virtual_table_players vtp ON vt.id = vtp.virtual_table_id
+        WHERE vtp.user_id = ? 
+          AND vt.table_id = ?
+          AND vt.status IN ('WAITING', 'RUNNING')
+          AND (
+            (vt.status = 'WAITING' AND vt.wait_end_time > NOW()) OR
+            (vt.status = 'RUNNING' AND (vt.end_time IS NULL OR vt.end_time > NOW()))
+          )
+        ORDER BY vt.created_at DESC
+        LIMIT 1
+    ");
+    $stmt->execute([$user_id, $table_id]);
+    $virtualTable = $stmt->fetch();
+}
 
 if ($virtualTable) {
     jsonResponse([

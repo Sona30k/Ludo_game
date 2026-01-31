@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS virtual_table_players (
     virtual_table_id VARCHAR(36) NOT NULL,
     user_id INT NULL, -- NULL for bots
     bot_id VARCHAR(50) NULL, -- NULL for humans, e.g., 'bot_1234567890_0'
+    bot_name VARCHAR(50) NULL, -- display name for bots
     is_bot TINYINT(1) DEFAULT 0,
     score INT DEFAULT 0,
     seat_no TINYINT NOT NULL, -- 0, 1, 2, 3
